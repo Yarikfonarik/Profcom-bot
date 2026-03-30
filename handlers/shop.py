@@ -2,7 +2,7 @@
 import os
 
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 
 from database import Session
@@ -18,7 +18,7 @@ def _build_shop_kb(items, is_admin: bool) -> InlineKeyboardMarkup:
     buttons = []
     for item in items:
         label = f"{item.name} — {item.price} баллов (остаток: {item.stock})"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"buy_item_{item.id}")])
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"view_item_{item.id}")])
     if is_admin:
         buttons.append([InlineKeyboardButton(text="⚙️ Управление товарами", callback_data="manage_items")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")])
@@ -33,11 +33,17 @@ async def open_shop(callback: CallbackQuery):
         items = session.query(Merchandise).filter(Merchandise.stock > 0).all()
 
     text = "🛍 Доступные товары:" if items else "🛍 Магазин пока пуст."
-    await callback.message.edit_text(text, reply_markup=_build_shop_kb(items, is_admin))
+
+    # Удаляем старое сообщение и отправляем новое (чтобы кнопка назад работала с фото)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(text, reply_markup=_build_shop_kb(items, is_admin))
 
 
-# ── Просмотр товара с фото ──────────────────────────────────────────────────
-@router.callback_query(F.data.startswith("buy_item_"))
+# ── Просмотр товара ─────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("view_item_"))
 async def view_item(callback: CallbackQuery):
     item_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
@@ -52,6 +58,14 @@ async def view_item(callback: CallbackQuery):
         balance = student.balance if student else 0
         can_buy = student and balance >= item.price
 
+        # Проверяем не купил ли уже этот товар
+        already_bought = False
+        if student:
+            already_bought = session.query(Purchase).filter_by(
+                student_id=student.id,
+                merch_id=item_id
+            ).first() is not None
+
     caption = (
         f"🛍 *{item.name}*\n\n"
         f"{item.description or ''}\n\n"
@@ -61,29 +75,34 @@ async def view_item(callback: CallbackQuery):
     )
 
     buttons = []
-    if can_buy:
+    if already_bought:
+        buttons.append([InlineKeyboardButton(text="✅ Уже куплено", callback_data="no_action")])
+    elif can_buy:
         buttons.append([InlineKeyboardButton(text="✅ Купить", callback_data=f"confirm_buy_{item_id}")])
     else:
         buttons.append([InlineKeyboardButton(text="❌ Недостаточно баллов", callback_data="no_action")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_shop")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
     if item.photo_file_id:
-        # Отправляем фото с подписью
         await callback.message.answer_photo(
             photo=item.photo_file_id,
             caption=caption,
             parse_mode="Markdown",
             reply_markup=kb
         )
-        await callback.message.delete()
     else:
-        await callback.message.edit_text(caption, parse_mode="Markdown", reply_markup=kb)
+        await callback.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
 
 @router.callback_query(F.data == "no_action")
 async def no_action(callback: CallbackQuery):
-    await callback.answer("❌ Недостаточно баллов для покупки", show_alert=True)
+    await callback.answer()
 
 
 # ── Подтверждение покупки ───────────────────────────────────────────────────
@@ -105,6 +124,12 @@ async def confirm_buy(callback: CallbackQuery):
                 f"❌ Недостаточно баллов. Нужно {item.price}, у тебя {student.balance}.",
                 show_alert=True
             )
+        # Проверка — не купил ли уже
+        already = session.query(Purchase).filter_by(
+            student_id=student.id, merch_id=item_id
+        ).first()
+        if already:
+            return await callback.answer("❌ Ты уже купил этот товар.", show_alert=True)
 
         student.balance -= item.price
         item.stock -= 1
@@ -137,9 +162,13 @@ async def manage_items(callback: CallbackQuery):
             callback_data=f"edititem_{item.id}"
         )])
     buttons.append([InlineKeyboardButton(text="➕ Добавить товар", callback_data="add_item")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_shop")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад",         callback_data="menu_shop")])
 
-    await callback.message.edit_text(
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(
         "⚙️ Управление товарами:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
@@ -156,7 +185,7 @@ async def _refresh_manage_items(message: Message):
             callback_data=f"edititem_{item.id}"
         )])
     buttons.append([InlineKeyboardButton(text="➕ Добавить товар", callback_data="add_item")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_shop")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад",         callback_data="menu_shop")])
 
     await message.answer(
         "⚙️ Управление товарами:",
@@ -164,13 +193,16 @@ async def _refresh_manage_items(message: Message):
     )
 
 
-# ── Меню редактирования товара ──────────────────────────────────────────────
 @router.callback_query(F.data.startswith("edititem_"))
 async def edit_item_menu(callback: CallbackQuery, state: FSMContext):
     item_id = int(callback.data.split("_")[1])
     await state.update_data(item_id=item_id)
 
-    await callback.message.edit_text(
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(
         "✏️ Что хотите изменить?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📛 Название",     callback_data="edit_name")],
@@ -274,7 +306,6 @@ async def edit_stock_step(message: Message, state: FSMContext):
 @router.message(ItemEditState.editing_photo, F.photo)
 async def edit_photo_step(message: Message, state: FSMContext):
     data = await state.get_data()
-    # Сохраняем file_id — Telegram хранит фото на своих серверах
     file_id = message.photo[-1].file_id
 
     with Session() as session:
@@ -330,7 +361,6 @@ async def add_item_stock(message: Message, state: FSMContext):
 
 @router.message(ItemCreateState.AWAITING_IMAGE, F.photo)
 async def add_item_image(message: Message, state: FSMContext):
-    # Сохраняем file_id — Telegram хранит фото на своих серверах
     file_id = message.photo[-1].file_id
     await state.update_data(photo_file_id=file_id)
     await _finish_item_creation(message, state)
