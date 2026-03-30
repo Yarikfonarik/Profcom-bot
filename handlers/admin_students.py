@@ -1,5 +1,8 @@
 # handlers/admin_students.py
-from aiogram import Router, F
+import io
+import pandas as pd
+
+from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import text
@@ -12,17 +15,23 @@ from config import ADMIN_IDS
 router = Router()
 
 
-# ── Панель студентов (только для админов) ───────────────────────────────────
+# ── Панель студентов ────────────────────────────────────────────────────────
 @router.callback_query(F.data == "students")
 async def open_student_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав")
 
-    await callback.message.edit_text(
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.message.answer(
         "👥 Панель студентов:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Найти студента", callback_data="find_student")],
-            [InlineKeyboardButton(text="⬅️ Назад",          callback_data="menu_back")],
+            [InlineKeyboardButton(text="🔍 Найти студента",       callback_data="find_student")],
+            [InlineKeyboardButton(text="📥 Импорт из Excel",      callback_data="import_students")],
+            [InlineKeyboardButton(text="⬅️ Назад",               callback_data="admin_panel")],
         ])
     )
 
@@ -50,7 +59,6 @@ async def search_student(message: Message, state: FSMContext):
     if not results:
         return await message.answer("❌ Студенты не найдены.")
 
-    # Правильный способ построить клавиатуру в aiogram 3
     buttons = [
         [InlineKeyboardButton(
             text=f"{row[1]} ({row[2]})",
@@ -126,7 +134,6 @@ async def save_field(message: Message, state: FSMContext):
                 value = int(value)
             except ValueError:
                 return await message.answer("❗ Баллы должны быть числом.")
-
         if field == "status" and value not in ("active", "blocked"):
             return await message.answer("❗ Статус: active или blocked")
         if field == "role" and value not in ("student", "moderator", "admin"):
@@ -137,3 +144,99 @@ async def save_field(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer("✅ Изменения сохранены.")
+
+
+# ── Импорт студентов из Excel ───────────────────────────────────────────────
+@router.callback_query(F.data == "import_students")
+async def import_students_prompt(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⛔ Нет прав")
+
+    await callback.message.answer(
+        "📥 Отправьте Excel файл (.xlsx) со студентами.\n\n"
+        "Ожидаемые колонки: Фамилия, Имя, Отчество, Факультет/Институт, barcode, Статус\n\n"
+        "⚠️ Новые студенты будут добавлены, существующие (по баркоду) — обновлены."
+    )
+    await state.set_state("import_excel")
+
+
+@router.message(F.document, F.document.file_name.endswith(".xlsx"))
+async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
+    current_state = await state.get_state()
+    if current_state != "import_excel":
+        return
+
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    await message.answer("⏳ Обрабатываю файл...")
+
+    try:
+        # Скачиваем файл в память
+        file = await bot.get_file(message.document.file_id)
+        file_bytes = await bot.download_file(file.file_path)
+        content = file_bytes.read()
+
+        df = pd.read_excel(io.BytesIO(content), dtype=str)
+        df.columns = df.columns.str.strip()
+
+        added = 0
+        updated = 0
+        errors = 0
+
+        with Session() as session:
+            for _, row in df.iterrows():
+                try:
+                    barcode = str(row.get("barcode", "")).strip()
+                    if not barcode or barcode == "nan":
+                        continue
+
+                    # Собираем ФИО
+                    parts = [
+                        str(row.get("Фамилия", "") or "").strip(),
+                        str(row.get("Имя", "") or "").strip(),
+                        str(row.get("Отчество", "") or "").strip(),
+                    ]
+                    full_name = " ".join(p for p in parts if p and p != "nan")
+
+                    faculty = str(row.get("Факультет/Институт", "") or "").strip()
+                    if faculty == "nan":
+                        faculty = ""
+
+                    status = str(row.get("Статус", "active") or "active").strip()
+                    if status not in ("active", "blocked"):
+                        status = "active"
+
+                    existing = session.query(Student).filter_by(barcode=barcode).first()
+
+                    if existing:
+                        existing.full_name = full_name
+                        existing.faculty = faculty
+                        existing.status = status
+                        updated += 1
+                    else:
+                        new_student = Student(
+                            full_name=full_name,
+                            barcode=barcode,
+                            faculty=faculty,
+                            status=status,
+                        )
+                        session.add(new_student)
+                        added += 1
+
+                except Exception:
+                    errors += 1
+
+            session.commit()
+
+        await state.clear()
+        await message.answer(
+            f"✅ Импорт завершён!\n\n"
+            f"➕ Добавлено: {added}\n"
+            f"🔄 Обновлено: {updated}\n"
+            f"❌ Ошибок: {errors}"
+        )
+
+    except Exception as e:
+        await state.clear()
+        await message.answer(f"❌ Ошибка при обработке файла: {e}")
