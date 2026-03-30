@@ -14,7 +14,6 @@ BACK_KB = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
-# ── Статистика системы (только для админов) ─────────────────────────────────
 @router.callback_query(F.data == "stats")
 async def show_admin_stats(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -58,10 +57,13 @@ async def show_admin_stats(callback: CallbackQuery):
         for idx, (name, total_pts) in enumerate(top_faculties, 1):
             msg += f"{idx}. {name} — {total_pts} баллов\n"
 
-    await callback.message.edit_text(msg, reply_markup=BACK_KB)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(msg, reply_markup=BACK_KB)
 
 
-# ── Моя личная статистика ───────────────────────────────────────────────────
 @router.callback_query(F.data == "my_stats")
 async def show_my_stats(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -70,10 +72,18 @@ async def show_my_stats(callback: CallbackQuery):
         if not student:
             return await callback.answer("❌ Ты не зарегистрирован.", show_alert=True)
 
-        rank = session.execute(
-            text("SELECT RANK() OVER (ORDER BY balance DESC) FROM students WHERE id = :id"),
+        # Правильный подсчёт ранга
+        rank_result = session.execute(
+            text("""
+                SELECT rank FROM (
+                    SELECT id, RANK() OVER (ORDER BY balance DESC) as rank
+                    FROM students
+                ) ranked
+                WHERE id = :id
+            """),
             {"id": student.id}
         ).scalar()
+
         tasks_done = session.execute(
             text("SELECT COUNT(*) FROM task_verifications WHERE student_id = :id AND status = 'approved'"),
             {"id": student.id}
@@ -94,9 +104,14 @@ async def show_my_stats(callback: CallbackQuery):
         f"📈 Твоя статистика\n\n"
         f"👤 {name}\n"
         f"💰 Баллов: {balance}\n"
-        f"🏆 Место в рейтинге: #{rank}\n\n"
+        f"🏆 Место в рейтинге: #{rank_result}\n\n"
         f"📝 Заданий выполнено: {tasks_done}\n"
         f"🛍 Покупок: {purchases}\n"
         f"📥 Мероприятий посещено: {attended}"
     )
-    await callback.message.edit_text(msg, reply_markup=BACK_KB)
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(msg, reply_markup=BACK_KB)
