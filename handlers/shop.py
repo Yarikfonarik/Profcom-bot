@@ -22,11 +22,10 @@ def _build_shop_kb(items, page: int, total: int, is_admin: bool) -> InlineKeyboa
     for item in items:
         emoji = _stock_emoji(item.stock)
         label = f"{emoji} {item.name} — {item.price} б. (остаток: {item.stock})"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"view_item_{item.id}_0")])
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"view_item_{item.id}_{page}")])
 
-    # Пагинация
-    nav = []
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"shop_page_{page - 1}"))
     nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
@@ -43,12 +42,14 @@ def _build_shop_kb(items, page: int, total: int, is_admin: bool) -> InlineKeyboa
 
 async def _show_shop_page(target, page: int, user_id: int):
     with Session() as session:
-        all_items = session.query(Merchandise).order_by(Merchandise.created_at).all()
+        all_items = session.query(Merchandise).filter(
+            Merchandise.is_deleted == False
+        ).order_by(Merchandise.created_at).all()
         total = len(all_items)
         page_items = all_items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
 
     is_admin = user_id in ADMIN_IDS
-    text = "🛍 Витрина магазина:" if page_items else "🛍 Магазин пока пуст."
+    txt = "🛍 Витрина магазина:" if page_items else "🛍 Магазин пока пуст."
     kb = _build_shop_kb(page_items, page, total, is_admin)
 
     if isinstance(target, CallbackQuery):
@@ -56,9 +57,9 @@ async def _show_shop_page(target, page: int, user_id: int):
             await target.message.delete()
         except Exception:
             pass
-        await target.message.answer(text, reply_markup=kb)
+        await target.message.answer(txt, reply_markup=kb)
     else:
-        await target.answer(text, reply_markup=kb)
+        await target.answer(txt, reply_markup=kb)
 
 
 @router.callback_query(F.data == "menu_shop")
@@ -72,27 +73,26 @@ async def shop_page(callback: CallbackQuery):
     await _show_shop_page(callback, page, callback.from_user.id)
 
 
-# ── Просмотр товара с навигацией ────────────────────────────────────────────
 @router.callback_query(F.data.startswith("view_item_"))
 async def view_item(callback: CallbackQuery):
-    # view_item_{id}_{shop_page}
     parts = callback.data.split("_")
     item_id = int(parts[2])
-    shop_page_num = int(parts[3]) if len(parts) > 3 else 0
+    shop_pg = int(parts[3]) if len(parts) > 3 else 0
     user_id = callback.from_user.id
 
     with Session() as session:
-        all_items = session.query(Merchandise).order_by(Merchandise.created_at).all()
+        all_items = session.query(Merchandise).filter(
+            Merchandise.is_deleted == False
+        ).order_by(Merchandise.created_at).all()
         item_ids = [i.id for i in all_items]
         item = session.query(Merchandise).get(item_id)
         student = session.query(Student).filter_by(telegram_id=user_id).first()
 
-        if not item:
+        if not item or item.is_deleted:
             return await callback.answer("❌ Товар не найден.", show_alert=True)
 
         balance = student.balance if student else 0
         can_buy = student and balance >= item.price and item.stock > 0
-
         already_bought = False
         if student:
             already_bought = session.query(Purchase).filter_by(
@@ -100,19 +100,15 @@ async def view_item(callback: CallbackQuery):
             ).first() is not None
 
         photo_file_id = item.photo_file_id
-        item_name = item.name
-        item_desc = item.description or ""
-        item_price = item.price
-        item_stock = item.stock
+        item_name, item_desc = item.name, item.description or ""
+        item_price, item_stock = item.price, item.stock
 
-    # Находим индекс текущего товара для навигации
     current_idx = item_ids.index(item_id) if item_id in item_ids else 0
     prev_id = item_ids[current_idx - 1] if current_idx > 0 else None
     next_id = item_ids[current_idx + 1] if current_idx < len(item_ids) - 1 else None
 
-    stock_emoji = _stock_emoji(item_stock)
     caption = (
-        f"{stock_emoji} *{item_name}*\n\n"
+        f"{_stock_emoji(item_stock)} *{item_name}*\n\n"
         f"{item_desc}\n\n"
         f"💰 Цена: {item_price} баллов\n"
         f"📦 Остаток: {item_stock} шт.\n"
@@ -120,8 +116,6 @@ async def view_item(callback: CallbackQuery):
     )
 
     buttons = []
-
-    # Кнопка действия
     if already_bought:
         buttons.append([InlineKeyboardButton(text="✅ Уже куплено", callback_data="noop")])
     elif item_stock <= 0:
@@ -131,24 +125,23 @@ async def view_item(callback: CallbackQuery):
     else:
         buttons.append([InlineKeyboardButton(text="❌ Недостаточно баллов", callback_data="noop")])
 
-    # Навигация между товарами
     nav = []
     if prev_id:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"view_item_{prev_id}_{shop_page_num}"))
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"view_item_{prev_id}_{shop_pg}"))
     nav.append(InlineKeyboardButton(text=f"{current_idx + 1}/{len(item_ids)}", callback_data="noop"))
     if next_id:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"view_item_{next_id}_{shop_page_num}"))
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"view_item_{next_id}_{shop_pg}"))
     if nav:
         buttons.append(nav)
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Все призы", callback_data=f"shop_page_{shop_page_num}")])
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    buttons.append([InlineKeyboardButton(text="⬅️ Все призы", callback_data=f"shop_page_{shop_pg}")])
 
     try:
         await callback.message.delete()
     except Exception:
         pass
 
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     if photo_file_id:
         await callback.message.answer_photo(photo=photo_file_id, caption=caption, parse_mode="Markdown", reply_markup=kb)
     else:
@@ -156,7 +149,7 @@ async def view_item(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "noop")
-async def noop_shop(callback: CallbackQuery):
+async def noop(callback: CallbackQuery):
     await callback.answer()
 
 
@@ -171,12 +164,11 @@ async def confirm_buy(callback: CallbackQuery):
 
         if not student:
             return await callback.answer("❌ Ты не зарегистрирован.", show_alert=True)
-        if not item or item.stock <= 0:
+        if not item or item.is_deleted or item.stock <= 0:
             return await callback.answer("❌ Товар недоступен.", show_alert=True)
         if student.balance < item.price:
-            return await callback.answer(f"❌ Нужно {item.price} баллов, у тебя {student.balance}.", show_alert=True)
-        already = session.query(Purchase).filter_by(student_id=student.id, merch_id=item_id).first()
-        if already:
+            return await callback.answer(f"❌ Нужно {item.price} б., у тебя {student.balance}.", show_alert=True)
+        if session.query(Purchase).filter_by(student_id=student.id, merch_id=item_id).first():
             return await callback.answer("❌ Ты уже купил этот товар.", show_alert=True)
 
         student.balance -= item.price
@@ -188,10 +180,10 @@ async def confirm_buy(callback: CallbackQuery):
     await callback.answer(f"✅ Куплено: {item_name}!", show_alert=True)
 
 
-# ── Управление товарами (админ) ──────────────────────────────────────────────
+# ── Управление товарами (только raw SQL для надёжности) ──────────────────────
 async def _show_manage(message: Message):
     with Session() as session:
-        items = session.query(Merchandise).all()
+        items = session.query(Merchandise).filter(Merchandise.is_deleted == False).all()
     buttons = []
     for item in items:
         buttons.append([InlineKeyboardButton(
@@ -240,9 +232,8 @@ async def edit_item_menu(callback: CallbackQuery, state: FSMContext):
 async def delete_item(callback: CallbackQuery):
     item_id = int(callback.data.split("_")[1])
     with Session() as session:
-        # Используем raw SQL для надёжного удаления (обходит проблемы со старыми колонками)
-        session.execute(text("DELETE FROM purchases WHERE merch_id = :id"), {"id": item_id})
-        session.execute(text("DELETE FROM merchandise WHERE id = :id"), {"id": item_id})
+        # Мягкое удаление — покупки и статистика сохраняются
+        session.execute(text("UPDATE merchandise SET is_deleted = TRUE, stock = 0 WHERE id = :id"), {"id": item_id})
         session.commit()
     await callback.answer("🗑 Товар удалён")
     try:
@@ -321,19 +312,20 @@ async def edit_stock_step(message: Message, state: FSMContext):
 @router.message(ItemEditState.editing_photo, F.photo)
 async def edit_photo_step(message: Message, state: FSMContext):
     data = await state.get_data()
-    file_id = message.photo[-1].file_id
     with Session() as session:
-        session.execute(text("UPDATE merchandise SET photo_file_id = :v WHERE id = :id"), {"v": file_id, "id": data["item_id"]})
+        session.execute(text("UPDATE merchandise SET photo_file_id = :v WHERE id = :id"), {"v": message.photo[-1].file_id, "id": data["item_id"]})
         session.commit()
     await state.clear()
     await message.answer("✅ Фото обновлено")
     await _show_manage(message)
 
 
+# ── Добавление нового товара ─────────────────────────────────────────────────
 @router.callback_query(F.data == "add_item")
 async def add_item_start(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав.")
+    await state.clear()
     await callback.message.answer("📛 Введите название товара:")
     await state.set_state(ItemCreateState.AWAITING_NAME)
 
@@ -386,8 +378,8 @@ async def _finish_item(message: Message, state: FSMContext):
     data = await state.get_data()
     with Session() as session:
         session.execute(text(
-            "INSERT INTO merchandise (name, description, price, stock, photo_file_id, created_at) "
-            "VALUES (:name, :desc, :price, :stock, :photo, NOW())"
+            "INSERT INTO merchandise (name, description, price, stock, photo_file_id, is_deleted, created_at) "
+            "VALUES (:name, :desc, :price, :stock, :photo, FALSE, NOW())"
         ), {
             "name": data["name"], "desc": data["description"],
             "price": data["price"], "stock": data["stock"],
