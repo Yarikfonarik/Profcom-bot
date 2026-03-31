@@ -33,7 +33,8 @@ class Task(Base):
     verification_type = Column(String(20), nullable=False, default='manual')
     correct_answer = Column(Text, nullable=True)
     proof_text = Column(Text, nullable=True)
-    deadline = Column(DateTime, nullable=True)   # дедлайн — после него задание скрыто
+    deadline = Column(DateTime, nullable=True)
+    is_deleted = Column(Boolean, default=False)  # мягкое удаление — статистика сохраняется
     created_at = Column(DateTime, default=datetime.utcnow)
     verifications = relationship("TaskVerification", back_populates="task")
 
@@ -59,6 +60,7 @@ class Merchandise(Base):
     price = Column(Integer, nullable=False)
     stock = Column(Integer, default=0)
     photo_file_id = Column(String(255), nullable=True)
+    is_deleted = Column(Boolean, default=False)  # мягкое удаление — статистика сохраняется
     created_at = Column(DateTime, default=datetime.utcnow)
     purchases = relationship("Purchase", back_populates="merchandise")
 
