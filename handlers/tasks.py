@@ -1,5 +1,5 @@
 # handlers/tasks.py
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -12,9 +12,14 @@ from keyboards import main_menu_keyboard
 
 router = Router()
 PAGE_SIZE = 5
+MOSCOW_OFFSET = timedelta(hours=3)
 
 
-def _task_status_emoji(task: Task, verif) -> str:
+def _now_moscow():
+    return datetime.utcnow() + MOSCOW_OFFSET
+
+
+def _task_status_emoji(verif) -> str:
     if verif is None:
         return "❌"
     if verif.status == "approved":
@@ -24,37 +29,18 @@ def _task_status_emoji(task: Task, verif) -> str:
     return "❌"
 
 
-def _deadline_str(task: Task) -> str:
-    if not task.deadline:
-        return ""
-    now = datetime.utcnow()
-    if task.deadline < now:
-        return " 🔒 завершено"
-    delta = task.deadline - now
-    hours = int(delta.total_seconds() // 3600)
-    mins = int((delta.total_seconds() % 3600) // 60)
-    if hours >= 24:
-        days = hours // 24
-        return f" ⏰ {days}д {hours % 24}ч"
-    if hours > 0:
-        return f" ⏰ {hours}ч {mins}м"
-    return f" ⏰ {mins}м"
-
-
 def _build_tasks_kb(tasks, verifs: dict, page: int, total: int, is_admin: bool) -> InlineKeyboardMarkup:
     buttons = []
     for t in tasks:
         v = verifs.get(t.id)
-        emoji = _task_status_emoji(t, v)
-        deadline_txt = _deadline_str(t)
-        label = f"{emoji} {t.title} — {t.points} б.{deadline_txt}"
+        emoji = _task_status_emoji(v)
+        label = f"{emoji} {t.title} — {t.points} б."
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"task_{t.id}")])
 
-    # Пагинация
     nav = []
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"tasks_page_{page - 1}"))
-    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
     nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
     if (page + 1) * PAGE_SIZE < total:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"tasks_page_{page + 1}"))
@@ -68,10 +54,10 @@ def _build_tasks_kb(tasks, verifs: dict, page: int, total: int, is_admin: bool) 
 
 
 async def _show_tasks_page(target, page: int, user_id: int):
-    now = datetime.utcnow()
+    now = _now_moscow()
     with Session() as session:
-        # Только активные задания (без дедлайна или дедлайн не истёк)
         all_tasks = session.query(Task).filter(
+            Task.is_deleted == False,
             (Task.deadline == None) | (Task.deadline > now)
         ).order_by(Task.created_at).all()
 
@@ -118,18 +104,19 @@ async def noop(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("task_") & ~F.data.startswith("task_ver") & ~F.data.startswith("tasks_page"))
+@router.callback_query(F.data.startswith("task_") & ~F.data.startswith("tasks_page_"))
 async def view_task(callback: CallbackQuery, state: FSMContext):
-    raw = callback.data[5:]  # убираем "task_"
+    raw = callback.data[5:]
     if not raw.isdigit():
         return
     task_id = int(raw)
     user_id = callback.from_user.id
-    now = datetime.utcnow()
+    now = _now_moscow()
+    is_admin = user_id in ADMIN_IDS
 
     with Session() as session:
         task = session.query(Task).get(task_id)
-        if not task:
+        if not task or task.is_deleted:
             return await callback.answer("Задание не найдено")
 
         student = session.query(Student).filter_by(telegram_id=user_id).first()
@@ -140,16 +127,19 @@ async def view_task(callback: CallbackQuery, state: FSMContext):
             ).first()
 
     is_expired = task.deadline and task.deadline < now
-    status_emoji = _task_status_emoji(task, verification)
+    status_emoji = _task_status_emoji(verification)
 
+    # Для обычных пользователей — без дедлайна
     msg = (
         f"{status_emoji} *{task.title}*\n\n"
         f"{task.description or ''}\n\n"
         f"💯 Баллов: {task.points}\n"
         f"🔍 Проверка: {'по ответу' if task.verification_type == 'auto' else 'по доказательству'}"
     )
-    if task.deadline:
-        msg += f"\n⏰ Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
+
+    # Дедлайн показываем ТОЛЬКО админу
+    if is_admin and task.deadline:
+        msg += f"\n⏰ Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')} МСК"
 
     buttons = []
     if is_expired:
@@ -157,11 +147,11 @@ async def view_task(callback: CallbackQuery, state: FSMContext):
     elif verification and verification.status == "approved":
         msg += "\n\n✅ Ты уже выполнил это задание"
     elif verification and verification.status == "pending":
-        msg += "\n\n⏳ Твоё доказательство на проверке"
+        msg += "\n\n⏳ Доказательство на проверке"
     else:
         buttons.append([InlineKeyboardButton(text="✍️ Выполнить", callback_data=f"do_task_{task_id}")])
 
-    if user_id in ADMIN_IDS:
+    if is_admin:
         buttons.append([InlineKeyboardButton(text="🗑 Удалить задание", callback_data=f"del_task_{task_id}")])
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_tasks")])
@@ -173,19 +163,17 @@ async def view_task(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
-# ── Удаление задания ─────────────────────────────────────────────────────────
+# ── Удаление задания (мягкое) ────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("del_task_"))
 async def delete_task(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав")
     task_id = int(callback.data.split("_")[2])
     with Session() as session:
-        # Сначала удаляем верификации
-        session.query(TaskVerification).filter_by(task_id=task_id).delete()
         task = session.query(Task).get(task_id)
         if task:
-            session.delete(task)
-        session.commit()
+            task.is_deleted = True  # мягкое удаление — статистика сохраняется
+            session.commit()
     await callback.answer("🗑 Задание удалено")
     await _show_tasks_page(callback, 0, callback.from_user.id)
 
@@ -204,7 +192,7 @@ async def start_task(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("✏️ Введите ваш ответ:")
         await state.set_state(TaskState.waiting_answer)
     else:
-        hint = task.proof_text or "Отправьте доказательство выполнения (текст или фото)"
+        hint = task.proof_text or "Отправьте доказательство (текст или фото)"
         await callback.message.answer(f"📤 {hint}")
         await state.set_state(TaskState.waiting_proof)
 
@@ -223,9 +211,7 @@ async def receive_answer(message: Message, state: FSMContext):
         if not student:
             await state.clear()
             return await message.answer("❌ Ты не зарегистрирован.")
-        answer = message.text.strip().lower()
-        correct = (task.correct_answer or "").strip().lower()
-        if answer == correct:
+        if message.text.strip().lower() == (task.correct_answer or "").strip().lower():
             student.balance += task.points
             session.add(TaskVerification(student_id=student.id, task_id=task_id, proof_text=message.text.strip(), status="approved"))
             session.commit()
@@ -279,7 +265,10 @@ async def show_moderation(callback: CallbackQuery):
             student = session.query(Student).get(v.student_id)
             task = session.query(Task).get(v.task_id)
             if student and task:
-                buttons.append([InlineKeyboardButton(text=f"👤 {student.full_name} — {task.title}", callback_data=f"moderate_{v.id}")])
+                buttons.append([InlineKeyboardButton(
+                    text=f"👤 {student.full_name} — {task.title}",
+                    callback_data=f"moderate_{v.id}"
+                )])
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
     try:
         await callback.message.delete()
@@ -297,11 +286,7 @@ async def view_verification(callback: CallbackQuery):
             return await callback.answer("Не найдено")
         student = session.query(Student).get(v.student_id)
         task = session.query(Task).get(v.task_id)
-        msg = (
-            f"👤 {student.full_name}\n"
-            f"📌 {task.title} (+{task.points} баллов)\n\n"
-            f"📝 {v.proof_text or '(нет текста)'}"
-        )
+        msg = f"👤 {student.full_name}\n📌 {task.title} (+{task.points} б.)\n\n📝 {v.proof_text or '(нет текста)'}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Принять", callback_data=f"approve_{v_id}"),
@@ -336,7 +321,7 @@ async def approve_verification(callback: CallbackQuery, bot: Bot):
     await callback.answer("✅ Принято!")
     if tg:
         try:
-            await bot.send_message(tg, f"🎉 Задание «{title}» принято! Начислено {pts} баллов.")
+            await bot.send_message(tg, f"🎉 Задание «{title}» принято! +{pts} баллов.")
         except Exception:
             pass
     await show_moderation(callback)
@@ -382,7 +367,7 @@ async def get_title(message: Message, state: FSMContext):
 @router.message(TaskState.AWAITING_DESCRIPTION)
 async def get_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
-    await message.answer("💯 Введите количество баллов:")
+    await message.answer("💯 Введите баллы:")
     await state.set_state(TaskState.AWAITING_POINTS)
 
 
@@ -426,10 +411,10 @@ async def get_proof_text(message: Message, state: FSMContext):
 async def _ask_deadline(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏰ Установить дедлайн", callback_data="set_deadline")],
-        [InlineKeyboardButton(text="♾ Без дедлайна", callback_data="no_deadline")],
+        [InlineKeyboardButton(text="♾ Без дедлайна",       callback_data="no_deadline")],
     ])
     await message.answer("Установить дедлайн?", reply_markup=kb)
-    await state.set_state(TaskState.AWAITING_PROOF_FILE)
+    await state.set_state(TaskState.AWAITING_PROOF_FILE)  # промежуточное состояние
 
 
 @router.callback_query(F.data == "no_deadline")
@@ -441,19 +426,16 @@ async def no_deadline(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "set_deadline")
 async def ask_deadline_input(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
-        "⏰ Введите дату и время дедлайна в формате:\n"
-        "ДД.ММ.ГГГГ ЧЧ:ММ\n\n"
-        "Например: 31.12.2025 23:59"
+        "⏰ Введите дату и время дедлайна (московское время):\n"
+        "Формат: ДД.ММ.ГГГГ ЧЧ:ММ\n\n"
+        "Пример: 31.12.2025 23:59"
     )
-    # Используем специальное состояние для ввода дедлайна
-    await state.set_state("awaiting_deadline_input")
+    await state.set_state(TaskState.AWAITING_DEADLINE)
 
 
-@router.message(F.text)
+# Хендлер дедлайна строго по состоянию — не перехватывает чужие сообщения
+@router.message(TaskState.AWAITING_DEADLINE)
 async def receive_deadline_input(message: Message, state: FSMContext):
-    current = await state.get_state()
-    if current != "awaiting_deadline_input":
-        return
     try:
         deadline = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
         await state.update_data(deadline=deadline)
