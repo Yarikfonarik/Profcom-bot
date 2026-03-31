@@ -14,8 +14,7 @@ class TaskState(StatesGroup):
     AWAITING_CORRECT_ANSWER = State()
     AWAITING_PROOF_TEXT = State()
     AWAITING_PROOF_FILE = State()
-
-    # Для выполнения задания
+    AWAITING_DEADLINE = State()   # новое состояние для дедлайна
     waiting_answer = State()
     waiting_proof = State()
 
@@ -53,3 +52,6 @@ class StudentSearchState(StatesGroup):
 class StudentEditState(StatesGroup):
     AWAITING_FIELD = State()
     AWAITING_VALUE = State()
+
+class ImportState(StatesGroup):
+    AWAITING_FILE = State()
