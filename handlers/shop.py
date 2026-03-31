@@ -2,6 +2,7 @@
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
+from sqlalchemy import text
 
 from database import Session
 from models import Merchandise, Student, Purchase
@@ -9,47 +10,88 @@ from states import ItemCreateState, ItemEditState
 from config import ADMIN_IDS
 
 router = Router()
+PAGE_SIZE = 5
 
 
-def _build_shop_kb(items, is_admin: bool) -> InlineKeyboardMarkup:
+def _stock_emoji(stock: int) -> str:
+    return "🛒" if stock > 0 else "🚫"
+
+
+def _build_shop_kb(items, page: int, total: int, is_admin: bool) -> InlineKeyboardMarkup:
     buttons = []
     for item in items:
-        label = f"{item.name} — {item.price} баллов (остаток: {item.stock})"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"view_item_{item.id}")])
+        emoji = _stock_emoji(item.stock)
+        label = f"{emoji} {item.name} — {item.price} б. (остаток: {item.stock})"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"view_item_{item.id}_0")])
+
+    # Пагинация
+    nav = []
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"shop_page_{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if (page + 1) * PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"shop_page_{page + 1}"))
+    if len(nav) > 1:
+        buttons.append(nav)
+
     if is_admin:
         buttons.append([InlineKeyboardButton(text="⚙️ Управление товарами", callback_data="manage_items")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+async def _show_shop_page(target, page: int, user_id: int):
+    with Session() as session:
+        all_items = session.query(Merchandise).order_by(Merchandise.created_at).all()
+        total = len(all_items)
+        page_items = all_items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+    is_admin = user_id in ADMIN_IDS
+    text = "🛍 Витрина магазина:" if page_items else "🛍 Магазин пока пуст."
+    kb = _build_shop_kb(page_items, page, total, is_admin)
+
+    if isinstance(target, CallbackQuery):
+        try:
+            await target.message.delete()
+        except Exception:
+            pass
+        await target.message.answer(text, reply_markup=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
+
+
 @router.callback_query(F.data == "menu_shop")
 async def open_shop(callback: CallbackQuery):
-    is_admin = callback.from_user.id in ADMIN_IDS
-    with Session() as session:
-        items = session.query(Merchandise).filter(Merchandise.stock > 0).all()
-
-    text = "🛍 Доступные товары:" if items else "🛍 Магазин пока пуст."
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await callback.message.answer(text, reply_markup=_build_shop_kb(items, is_admin))
+    await _show_shop_page(callback, 0, callback.from_user.id)
 
 
+@router.callback_query(F.data.startswith("shop_page_"))
+async def shop_page(callback: CallbackQuery):
+    page = int(callback.data.split("_")[2])
+    await _show_shop_page(callback, page, callback.from_user.id)
+
+
+# ── Просмотр товара с навигацией ────────────────────────────────────────────
 @router.callback_query(F.data.startswith("view_item_"))
 async def view_item(callback: CallbackQuery):
-    item_id = int(callback.data.split("_")[2])
+    # view_item_{id}_{shop_page}
+    parts = callback.data.split("_")
+    item_id = int(parts[2])
+    shop_page_num = int(parts[3]) if len(parts) > 3 else 0
     user_id = callback.from_user.id
 
     with Session() as session:
+        all_items = session.query(Merchandise).order_by(Merchandise.created_at).all()
+        item_ids = [i.id for i in all_items]
         item = session.query(Merchandise).get(item_id)
         student = session.query(Student).filter_by(telegram_id=user_id).first()
 
-        if not item or item.stock <= 0:
-            return await callback.answer("❌ Товар недоступен.", show_alert=True)
+        if not item:
+            return await callback.answer("❌ Товар не найден.", show_alert=True)
 
         balance = student.balance if student else 0
-        can_buy = student and balance >= item.price
+        can_buy = student and balance >= item.price and item.stock > 0
 
         already_bought = False
         if student:
@@ -63,8 +105,14 @@ async def view_item(callback: CallbackQuery):
         item_price = item.price
         item_stock = item.stock
 
+    # Находим индекс текущего товара для навигации
+    current_idx = item_ids.index(item_id) if item_id in item_ids else 0
+    prev_id = item_ids[current_idx - 1] if current_idx > 0 else None
+    next_id = item_ids[current_idx + 1] if current_idx < len(item_ids) - 1 else None
+
+    stock_emoji = _stock_emoji(item_stock)
     caption = (
-        f"🛍 *{item_name}*\n\n"
+        f"{stock_emoji} *{item_name}*\n\n"
         f"{item_desc}\n\n"
         f"💰 Цена: {item_price} баллов\n"
         f"📦 Остаток: {item_stock} шт.\n"
@@ -72,13 +120,28 @@ async def view_item(callback: CallbackQuery):
     )
 
     buttons = []
+
+    # Кнопка действия
     if already_bought:
-        buttons.append([InlineKeyboardButton(text="✅ Уже куплено", callback_data="no_action")])
+        buttons.append([InlineKeyboardButton(text="✅ Уже куплено", callback_data="noop")])
+    elif item_stock <= 0:
+        buttons.append([InlineKeyboardButton(text="🚫 Нет в наличии", callback_data="noop")])
     elif can_buy:
         buttons.append([InlineKeyboardButton(text="🛒 Купить", callback_data=f"confirm_buy_{item_id}")])
     else:
-        buttons.append([InlineKeyboardButton(text="❌ Недостаточно баллов", callback_data="no_action")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_shop")])
+        buttons.append([InlineKeyboardButton(text="❌ Недостаточно баллов", callback_data="noop")])
+
+    # Навигация между товарами
+    nav = []
+    if prev_id:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"view_item_{prev_id}_{shop_page_num}"))
+    nav.append(InlineKeyboardButton(text=f"{current_idx + 1}/{len(item_ids)}", callback_data="noop"))
+    if next_id:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"view_item_{next_id}_{shop_page_num}"))
+    if nav:
+        buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Все призы", callback_data=f"shop_page_{shop_page_num}")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     try:
@@ -92,8 +155,8 @@ async def view_item(callback: CallbackQuery):
         await callback.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
 
-@router.callback_query(F.data == "no_action")
-async def no_action(callback: CallbackQuery):
+@router.callback_query(F.data == "noop")
+async def noop_shop(callback: CallbackQuery):
     await callback.answer()
 
 
@@ -111,8 +174,7 @@ async def confirm_buy(callback: CallbackQuery):
         if not item or item.stock <= 0:
             return await callback.answer("❌ Товар недоступен.", show_alert=True)
         if student.balance < item.price:
-            return await callback.answer(f"❌ Недостаточно баллов. Нужно {item.price}, у тебя {student.balance}.", show_alert=True)
-
+            return await callback.answer(f"❌ Нужно {item.price} баллов, у тебя {student.balance}.", show_alert=True)
         already = session.query(Purchase).filter_by(student_id=student.id, merch_id=item_id).first()
         if already:
             return await callback.answer("❌ Ты уже купил этот товар.", show_alert=True)
@@ -126,14 +188,16 @@ async def confirm_buy(callback: CallbackQuery):
     await callback.answer(f"✅ Куплено: {item_name}!", show_alert=True)
 
 
-# ── Управление товарами ─────────────────────────────────────────────────────
+# ── Управление товарами (админ) ──────────────────────────────────────────────
 async def _show_manage(message: Message):
     with Session() as session:
         items = session.query(Merchandise).all()
-
     buttons = []
     for item in items:
-        buttons.append([InlineKeyboardButton(text=f"{item.name} ({item.stock} шт.)", callback_data=f"edititem_{item.id}")])
+        buttons.append([InlineKeyboardButton(
+            text=f"{item.name} ({item.stock} шт.)",
+            callback_data=f"edititem_{item.id}"
+        )])
     buttons.append([InlineKeyboardButton(text="➕ Добавить товар", callback_data="add_item")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_shop")])
     await message.answer("⚙️ Управление товарами:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -159,7 +223,7 @@ async def edit_item_menu(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
     await callback.message.answer(
-        "✏️ Что хотите изменить?",
+        "✏️ Что изменить?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📛 Название",     callback_data="edit_name")],
             [InlineKeyboardButton(text="📄 Описание",     callback_data="edit_description")],
@@ -173,18 +237,14 @@ async def edit_item_menu(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("deleteitem_"))
-async def delete_item(callback: CallbackQuery, state: FSMContext):
+async def delete_item(callback: CallbackQuery):
     item_id = int(callback.data.split("_")[1])
     with Session() as session:
-        item = session.query(Merchandise).get(item_id)
-        if item:
-            session.delete(item)
-            session.commit()
-            item_deleted = True
-        else:
-            item_deleted = False
-
-    await callback.answer("🗑 Товар удалён" if item_deleted else "❌ Товар не найден")
+        # Используем raw SQL для надёжного удаления (обходит проблемы со старыми колонками)
+        session.execute(text("DELETE FROM purchases WHERE merch_id = :id"), {"id": item_id})
+        session.execute(text("DELETE FROM merchandise WHERE id = :id"), {"id": item_id})
+        session.commit()
+    await callback.answer("🗑 Товар удалён")
     try:
         await callback.message.delete()
     except Exception:
@@ -195,10 +255,15 @@ async def delete_item(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("edit_"))
 async def choose_edit_field(callback: CallbackQuery, state: FSMContext):
     field = callback.data.split("_")[1]
-    prompts = {"name": "📛 Введите новое название:", "description": "📄 Введите новое описание:",
-               "price": "💰 Введите новую цену:", "stock": "📦 Введите новое количество:", "photo": "🖼 Отправьте новое фото:"}
-    state_map = {"name": ItemEditState.editing_name, "description": ItemEditState.editing_description,
-                 "price": ItemEditState.editing_price, "stock": ItemEditState.editing_stock, "photo": ItemEditState.editing_photo}
+    prompts = {
+        "name": "📛 Новое название:", "description": "📄 Новое описание:",
+        "price": "💰 Новая цена:", "stock": "📦 Новое количество:", "photo": "🖼 Отправьте фото:",
+    }
+    state_map = {
+        "name": ItemEditState.editing_name, "description": ItemEditState.editing_description,
+        "price": ItemEditState.editing_price, "stock": ItemEditState.editing_stock,
+        "photo": ItemEditState.editing_photo,
+    }
     if field not in prompts:
         return
     await state.set_state(state_map[field])
@@ -209,8 +274,7 @@ async def choose_edit_field(callback: CallbackQuery, state: FSMContext):
 async def edit_name_step(message: Message, state: FSMContext):
     data = await state.get_data()
     with Session() as session:
-        item = session.query(Merchandise).get(data["item_id"])
-        item.name = message.text.strip()
+        session.execute(text("UPDATE merchandise SET name = :v WHERE id = :id"), {"v": message.text.strip(), "id": data["item_id"]})
         session.commit()
     await state.clear()
     await message.answer("✅ Название обновлено")
@@ -221,8 +285,7 @@ async def edit_name_step(message: Message, state: FSMContext):
 async def edit_description_step(message: Message, state: FSMContext):
     data = await state.get_data()
     with Session() as session:
-        item = session.query(Merchandise).get(data["item_id"])
-        item.description = message.text.strip()
+        session.execute(text("UPDATE merchandise SET description = :v WHERE id = :id"), {"v": message.text.strip(), "id": data["item_id"]})
         session.commit()
     await state.clear()
     await message.answer("✅ Описание обновлено")
@@ -235,8 +298,7 @@ async def edit_price_step(message: Message, state: FSMContext):
         return await message.answer("❗ Введите число")
     data = await state.get_data()
     with Session() as session:
-        item = session.query(Merchandise).get(data["item_id"])
-        item.price = int(message.text.strip())
+        session.execute(text("UPDATE merchandise SET price = :v WHERE id = :id"), {"v": int(message.text.strip()), "id": data["item_id"]})
         session.commit()
     await state.clear()
     await message.answer("✅ Цена обновлена")
@@ -249,8 +311,7 @@ async def edit_stock_step(message: Message, state: FSMContext):
         return await message.answer("❗ Введите число")
     data = await state.get_data()
     with Session() as session:
-        item = session.query(Merchandise).get(data["item_id"])
-        item.stock = int(message.text.strip())
+        session.execute(text("UPDATE merchandise SET stock = :v WHERE id = :id"), {"v": int(message.text.strip()), "id": data["item_id"]})
         session.commit()
     await state.clear()
     await message.answer("✅ Количество обновлено")
@@ -260,9 +321,9 @@ async def edit_stock_step(message: Message, state: FSMContext):
 @router.message(ItemEditState.editing_photo, F.photo)
 async def edit_photo_step(message: Message, state: FSMContext):
     data = await state.get_data()
+    file_id = message.photo[-1].file_id
     with Session() as session:
-        item = session.query(Merchandise).get(data["item_id"])
-        item.photo_file_id = message.photo[-1].file_id
+        session.execute(text("UPDATE merchandise SET photo_file_id = :v WHERE id = :id"), {"v": file_id, "id": data["item_id"]})
         session.commit()
     await state.clear()
     await message.answer("✅ Фото обновлено")
@@ -272,7 +333,7 @@ async def edit_photo_step(message: Message, state: FSMContext):
 @router.callback_query(F.data == "add_item")
 async def add_item_start(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
-        return await callback.answer("⛔ У вас нет прав.")
+        return await callback.answer("⛔ Нет прав.")
     await callback.message.answer("📛 Введите название товара:")
     await state.set_state(ItemCreateState.AWAITING_NAME)
 
@@ -280,14 +341,14 @@ async def add_item_start(callback: CallbackQuery, state: FSMContext):
 @router.message(ItemCreateState.AWAITING_NAME)
 async def add_item_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
-    await message.answer("📄 Введите описание товара:")
+    await message.answer("📄 Описание:")
     await state.set_state(ItemCreateState.AWAITING_DESCRIPTION)
 
 
 @router.message(ItemCreateState.AWAITING_DESCRIPTION)
 async def add_item_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
-    await message.answer("💰 Введите цену (число):")
+    await message.answer("💰 Цена (число):")
     await state.set_state(ItemCreateState.AWAITING_PRICE)
 
 
@@ -296,7 +357,7 @@ async def add_item_price(message: Message, state: FSMContext):
     if not message.text.strip().isdigit():
         return await message.answer("❗ Введите число")
     await state.update_data(price=int(message.text.strip()))
-    await message.answer("📦 Введите количество:")
+    await message.answer("📦 Количество:")
     await state.set_state(ItemCreateState.AWAITING_STOCK)
 
 
@@ -305,31 +366,34 @@ async def add_item_stock(message: Message, state: FSMContext):
     if not message.text.strip().isdigit():
         return await message.answer("❗ Введите число")
     await state.update_data(stock=int(message.text.strip()))
-    await message.answer("🖼 Отправьте фото товара (или напишите «нет»):")
+    await message.answer("🖼 Фото (или напишите «нет»):")
     await state.set_state(ItemCreateState.AWAITING_IMAGE)
 
 
 @router.message(ItemCreateState.AWAITING_IMAGE, F.photo)
 async def add_item_image(message: Message, state: FSMContext):
     await state.update_data(photo_file_id=message.photo[-1].file_id)
-    await _finish_item_creation(message, state)
+    await _finish_item(message, state)
 
 
 @router.message(ItemCreateState.AWAITING_IMAGE)
 async def add_item_no_image(message: Message, state: FSMContext):
     await state.update_data(photo_file_id=None)
-    await _finish_item_creation(message, state)
+    await _finish_item(message, state)
 
 
-async def _finish_item_creation(message: Message, state: FSMContext):
+async def _finish_item(message: Message, state: FSMContext):
     data = await state.get_data()
     with Session() as session:
-        session.add(Merchandise(
-            name=data["name"], description=data["description"],
-            price=data["price"], stock=data["stock"],
-            photo_file_id=data.get("photo_file_id"),
-        ))
+        session.execute(text(
+            "INSERT INTO merchandise (name, description, price, stock, photo_file_id, created_at) "
+            "VALUES (:name, :desc, :price, :stock, :photo, NOW())"
+        ), {
+            "name": data["name"], "desc": data["description"],
+            "price": data["price"], "stock": data["stock"],
+            "photo": data.get("photo_file_id"),
+        })
         session.commit()
     await state.clear()
-    await message.answer("✅ Товар успешно добавлен.")
+    await message.answer("✅ Товар добавлен.")
     await _show_manage(message)
