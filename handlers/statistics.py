@@ -1,10 +1,10 @@
-# handlers/statistics.py — Профиль + Рейтинг объединены
+# handlers/statistics.py
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import text, desc
 
 from database import Session
-from models import Student
+from models import Student, Purchase, Merchandise
 from config import ADMIN_IDS
 
 router = Router()
@@ -14,7 +14,6 @@ BACK_KB = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
-# ── Профиль (объединён с рейтингом) ─────────────────────────────────────────
 @router.callback_query(F.data == "my_profile")
 async def show_my_profile(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -24,18 +23,14 @@ async def show_my_profile(callback: CallbackQuery):
             return await callback.answer("❌ Ты не зарегистрирован.", show_alert=True)
 
         rank = session.execute(
-            text("""
-                SELECT rank FROM (
-                    SELECT id, RANK() OVER (ORDER BY balance DESC) as rank FROM students
-                ) r WHERE id = :id
-            """),
+            text("SELECT rank FROM (SELECT id, RANK() OVER (ORDER BY balance DESC) as rank FROM students) r WHERE id = :id"),
             {"id": student.id}
         ).scalar()
         tasks_done = session.execute(
             text("SELECT COUNT(*) FROM task_verifications WHERE student_id = :id AND status = 'approved'"),
             {"id": student.id}
         ).scalar()
-        purchases = session.execute(
+        purchases_count = session.execute(
             text("SELECT COUNT(*) FROM purchases WHERE student_id = :id"),
             {"id": student.id}
         ).scalar()
@@ -53,13 +48,14 @@ async def show_my_profile(callback: CallbackQuery):
             f"🏆 Место в рейтинге: #{rank}\n"
             f"📊 Статус: {status}\n\n"
             f"📝 Заданий выполнено: {tasks_done}\n"
-            f"🛍 Покупок: {purchases}\n"
+            f"🛍 Покупок: {purchases_count}\n"
             f"📥 Мероприятий посещено: {attended}"
         )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏆 Общий рейтинг",      callback_data="rating_all")],
         [InlineKeyboardButton(text="🏛 Рейтинг факультета",  callback_data="rating_faculty")],
+        [InlineKeyboardButton(text="🧾 Мои покупки",         callback_data="my_purchases")],
         [InlineKeyboardButton(text="⬅️ Назад",              callback_data="menu_back")],
     ])
 
@@ -70,17 +66,14 @@ async def show_my_profile(callback: CallbackQuery):
     await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
 
 
-# ── Рейтинги ─────────────────────────────────────────────────────────────────
 @router.callback_query(F.data == "rating_all")
 async def show_global_rating(callback: CallbackQuery):
     with Session() as session:
         top = session.query(Student).filter(Student.status == "active").order_by(desc(Student.balance)).limit(10).all()
 
-    if not top:
-        msg = "🏆 Рейтинг пока пуст."
-    else:
-        lines = [f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)]
-        msg = "🏆 Топ‑10 студентов:\n\n" + "\n".join(lines)
+    msg = "🏆 Топ‑10 студентов:\n\n" + "\n".join(
+        f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)
+    ) if top else "🏆 Рейтинг пока пуст."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]
@@ -102,11 +95,9 @@ async def show_faculty_rating(callback: CallbackQuery):
         top = session.query(Student).filter_by(faculty=me.faculty, status="active").order_by(desc(Student.balance)).limit(10).all()
         faculty = me.faculty
 
-    if not top:
-        msg = f"🏛 Рейтинг факультета «{faculty}» пуст."
-    else:
-        lines = [f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)]
-        msg = f"🏛 Топ‑10 «{faculty}»:\n\n" + "\n".join(lines)
+    msg = f"🏛 Топ‑10 «{faculty}»:\n\n" + "\n".join(
+        f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)
+    ) if top else f"🏛 Рейтинг «{faculty}» пуст."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]
@@ -118,7 +109,6 @@ async def show_faculty_rating(callback: CallbackQuery):
     await callback.message.answer(msg, reply_markup=kb)
 
 
-# ── Статистика системы (только для админов) ──────────────────────────────────
 @router.callback_query(F.data == "stats")
 async def show_admin_stats(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -131,23 +121,22 @@ async def show_admin_stats(callback: CallbackQuery):
         tasks = session.execute(text("SELECT COUNT(*) FROM task_verifications WHERE status = 'approved'")).scalar()
         purchases = session.execute(text("SELECT COUNT(*) FROM purchases")).scalar()
         events = session.execute(text("SELECT COUNT(*) FROM attendance")).scalar()
-        top_faculties = session.execute(text("""
-            SELECT faculty, SUM(balance) AS total FROM students
-            WHERE faculty IS NOT NULL GROUP BY faculty ORDER BY total DESC LIMIT 3
-        """)).fetchall()
+        top_faculties = session.execute(text(
+            "SELECT faculty, SUM(balance) AS total FROM students WHERE faculty IS NOT NULL GROUP BY faculty ORDER BY total DESC LIMIT 3"
+        )).fetchall()
 
     msg = (
         f"📊 Статистика системы\n\n"
         f"👥 Всего: {total} | Активных: {active}\n"
-        f"🧑‍💼 Админов и модераторов: {staff}\n"
+        f"🧑‍💼 Адм. и модераторов: {staff}\n"
         f"📝 Заданий выполнено: {tasks}\n"
         f"🛍 Покупок: {purchases}\n"
         f"📥 Посещений: {events}\n"
     )
     if top_faculties:
         msg += "\n🏛 Топ факультетов:\n"
-        for idx, (name, total_pts) in enumerate(top_faculties, 1):
-            msg += f"{idx}. {name} — {total_pts} б.\n"
+        for idx, (name, tp) in enumerate(top_faculties, 1):
+            msg += f"{idx}. {name} — {tp} б.\n"
 
     try:
         await callback.message.delete()
