@@ -11,11 +11,9 @@ router = Router()
 
 
 async def send_main_menu(target, is_admin: bool):
-    """Отправляет главное меню новым сообщением снизу."""
     if isinstance(target, Message):
         await target.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
     elif isinstance(target, CallbackQuery):
-        # Удаляем старое сообщение и отправляем новое снизу
         try:
             await target.message.delete()
         except Exception:
@@ -41,24 +39,21 @@ async def menu_main(callback: CallbackQuery, state: FSMContext):
     await go_back(callback, state)
 
 
-# ── Админ панель ────────────────────────────────────────────────────────────
 @router.callback_query(F.data == "admin_panel")
 async def admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав")
-
     try:
         await callback.message.delete()
     except Exception:
         pass
-
     await callback.message.answer(
         "👨‍💼 Админ панель:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👥 Студенты",             callback_data="students")],
-            [InlineKeyboardButton(text="📊 Статистика системы",   callback_data="stats")],
-            [InlineKeyboardButton(text="📤 Загрузить сканы",      callback_data="menu_events")],
-            [InlineKeyboardButton(text="📑 Модерация заданий",    callback_data="menu_moderation")],
-            [InlineKeyboardButton(text="⬅️ Назад",               callback_data="menu_back")],
+            [InlineKeyboardButton(text="👥 Студенты",           callback_data="students")],
+            [InlineKeyboardButton(text="📊 Статистика системы", callback_data="stats")],
+            [InlineKeyboardButton(text="📤 Загрузить сканы",    callback_data="menu_events")],
+            [InlineKeyboardButton(text="📑 Модерация заданий",  callback_data="menu_moderation")],
+            [InlineKeyboardButton(text="⬅️ Назад",             callback_data="menu_back")],
         ])
     )
