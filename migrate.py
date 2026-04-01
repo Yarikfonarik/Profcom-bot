@@ -8,6 +8,7 @@ migrations = [
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS show_deadline BOOLEAN DEFAULT FALSE;",
     "ALTER TABLE merchandise ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(255);",
     "ALTER TABLE merchandise ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;",
+    "ALTER TABLE students ADD COLUMN IF NOT EXISTS qr_file_id VARCHAR(255);",
 ]
 
 with engine.connect() as conn:
