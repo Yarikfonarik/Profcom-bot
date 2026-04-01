@@ -21,6 +21,7 @@ from handlers import (
     support,
 )
 
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -30,7 +31,6 @@ async def main():
     Base.metadata.create_all(engine)
 
     bot = Bot(token=BOT_TOKEN)
-
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.include_router(registration.router)
