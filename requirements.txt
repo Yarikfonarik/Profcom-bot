@@ -6,3 +6,5 @@ pandas
 openpyxl
 watchfiles
 aiohttp-socks
+qrcode[pil]
+Pillow
