@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from models import Student
 from database import Session
-from states import StudentSearchState, StudentEditState, ImportState
+from states import StudentSearchState, StudentEditState, ImportState, AdminMsgState
 from config import ADMIN_IDS
 
 router = Router()
@@ -42,7 +42,8 @@ async def prompt_search(callback: CallbackQuery, state: FSMContext):
 
 @router.message(StudentSearchState.AWAITING_INPUT)
 async def search_student(message: Message, state: FSMContext):
-    query = message.text.strip()
+    # Убираем лишние пробелы из запроса
+    query = " ".join(message.text.strip().split())
     await state.clear()
 
     with Session() as session:
@@ -100,7 +101,7 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💰 Баллы",       callback_data=f"sf_{student_id}_balance"),
-            InlineKeyboardButton(text="🔄 Обнулить",    callback_data=f"sf_{student_id}_reset"),
+            InlineKeyboardButton(text="🔄 Обнулить",    callback_data=f"sreset_{student_id}"),
         ],
         [
             InlineKeyboardButton(text="🏛 Факультет",   callback_data=f"sf_{student_id}_faculty"),
@@ -110,8 +111,11 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="🔒 Статус",      callback_data=f"sf_{student_id}_status"),
             InlineKeyboardButton(text="📝 ФИО",         callback_data=f"sf_{student_id}_full_name"),
         ],
-        [InlineKeyboardButton(text="💬 Написать",       callback_data=f"msg_student_{student_id}")],
-        [InlineKeyboardButton(text="⬅️ К списку",       callback_data="find_student")],
+        [InlineKeyboardButton(text="💬 Написать",       callback_data=f"smsg_{student_id}")],
+        [
+            InlineKeyboardButton(text="🔍 Найти ещё",   callback_data="find_student"),
+            InlineKeyboardButton(text="🏠 Админ панель", callback_data="admin_panel"),
+        ],
     ])
 
     try:
@@ -121,24 +125,22 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
 
 
-# ── Обнуление баллов ─────────────────────────────────────────────────────────
-@router.callback_query(F.data.startswith("sf_") & F.data.endswith("_reset"))
-async def reset_balance(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    student_id = int(parts[1])
+# ── Обнуление баллов одного студента ────────────────────────────────────────
+@router.callback_query(F.data.startswith("sreset_"))
+async def reset_one_balance(callback: CallbackQuery, state: FSMContext):
+    student_id = int(callback.data.split("_")[1])
     with Session() as session:
         s = session.query(Student).get(student_id)
         if s:
             s.balance = 0
             session.commit()
     await callback.answer("✅ Баллы обнулены")
-    # Обновляем карточку
     callback.data = f"stucard_{student_id}"
-    await show_student_card(callback, FSMContext.__new__(FSMContext))
+    await show_student_card(callback, state)
 
 
 # ── Редактирование поля ──────────────────────────────────────────────────────
-@router.callback_query(F.data.startswith("sf_") & ~F.data.endswith("_reset"))
+@router.callback_query(F.data.startswith("sf_"))
 async def quick_edit_field(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_", 2)
     student_id = int(parts[1])
@@ -207,25 +209,22 @@ async def save_student_field(message: Message, state: FSMContext):
     await show_student_card(FakeCb(), state)
 
 
-# ── Написать сообщение студенту ──────────────────────────────────────────────
-@router.callback_query(F.data.startswith("msg_student_"))
+# ── Написать студенту ────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("smsg_"))
 async def msg_student_prompt(callback: CallbackQuery, state: FSMContext):
-    student_id = int(callback.data.split("_")[2])
+    student_id = int(callback.data.split("_")[1])
     await state.update_data(msg_student_id=student_id)
-    await state.set_state("admin_msg_student")
+    await state.set_state(AdminMsgState.AWAITING_MESSAGE)
     await callback.message.answer(
-        "💬 Введите сообщение для студента:",
+        "💬 Введите сообщение для студента (текст или фото):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data=f"stucard_{student_id}")]
         ])
     )
 
 
-@router.message(F.text, lambda msg: True)
+@router.message(AdminMsgState.AWAITING_MESSAGE)
 async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
-    current = await state.get_state()
-    if current != "admin_msg_student":
-        return
     data = await state.get_data()
     student_id = data.get("msg_student_id")
     await state.clear()
@@ -234,14 +233,27 @@ async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
         s = session.query(Student).get(student_id)
         if not s or not s.telegram_id:
             return await message.answer("❌ У студента нет Telegram.")
+        target_id = s.telegram_id
+        student_name = s.full_name
+
+    mod_name = message.from_user.full_name or "Администрация"
+    header = f"📩 *Сообщение от администрации ({mod_name}):*\n\n"
+
+    # Кнопка ответить — ведёт обратно в поддержку
+    reply_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Ответить", callback_data="support")]
+    ])
 
     try:
-        await bot.send_message(
-            s.telegram_id,
-            f"📩 *Сообщение от администрации:*\n\n{message.text}",
-            parse_mode="Markdown"
-        )
-        await message.answer("✅ Сообщение отправлено!")
+        if message.text:
+            await bot.send_message(target_id, header + message.text, parse_mode="Markdown", reply_markup=reply_kb)
+        elif message.photo:
+            await bot.send_photo(target_id, message.photo[-1].file_id,
+                caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=reply_kb)
+        elif message.document:
+            await bot.send_document(target_id, message.document.file_id,
+                caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=reply_kb)
+        await message.answer(f"✅ Сообщение отправлено студенту {student_name}!")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
