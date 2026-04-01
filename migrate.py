@@ -5,6 +5,7 @@ from database import engine
 migrations = [
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline TIMESTAMP;",
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;",
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS show_deadline BOOLEAN DEFAULT FALSE;",
     "ALTER TABLE merchandise ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(255);",
     "ALTER TABLE merchandise ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;",
 ]
@@ -14,6 +15,6 @@ with engine.connect() as conn:
         try:
             conn.execute(text(sql))
             conn.commit()
-            print(f"✅ {sql[:60]}")
+            print(f"✅ {sql[:70]}")
         except Exception as e:
             print(f"⚠️ {e}")
