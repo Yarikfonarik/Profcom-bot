@@ -1,5 +1,5 @@
 # handlers/shop.py
-from aiogram import Router, F, Bot
+from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import text
@@ -13,14 +13,27 @@ router = Router()
 PAGE_SIZE = 5
 
 
-def _stock_emoji(stock: int) -> str:
+def _stock_emoji(stock: int, bought: bool) -> str:
+    if bought:
+        return "✅"
     return "🛒" if stock > 0 else "🚫"
 
 
-def _build_shop_kb(items, page: int, total: int, is_admin: bool) -> InlineKeyboardMarkup:
+async def _get_bought_ids(user_id: int) -> set:
+    """Возвращает set merch_id которые купил пользователь."""
+    with Session() as session:
+        student = session.query(Student).filter_by(telegram_id=user_id).first()
+        if not student:
+            return set()
+        purchases = session.query(Purchase).filter_by(student_id=student.id).all()
+        return {p.merch_id for p in purchases}
+
+
+def _build_shop_kb(items, bought_ids: set, page: int, total: int, is_admin: bool) -> InlineKeyboardMarkup:
     buttons = []
     for item in items:
-        emoji = _stock_emoji(item.stock)
+        bought = item.id in bought_ids
+        emoji = _stock_emoji(item.stock, bought)
         label = f"{emoji} {item.name} — {item.price} б. (остаток: {item.stock})"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"view_item_{item.id}_{page}")])
 
@@ -28,12 +41,13 @@ def _build_shop_kb(items, page: int, total: int, is_admin: bool) -> InlineKeyboa
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"shop_page_{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop_shop"))
     if (page + 1) * PAGE_SIZE < total:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"shop_page_{page + 1}"))
     if len(nav) > 1:
         buttons.append(nav)
 
+    buttons.append([InlineKeyboardButton(text="🧾 Мои покупки", callback_data="my_purchases")])
     if is_admin:
         buttons.append([InlineKeyboardButton(text="⚙️ Управление товарами", callback_data="manage_items")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")])
@@ -48,9 +62,10 @@ async def _show_shop_page(target, page: int, user_id: int):
         total = len(all_items)
         page_items = all_items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
 
+    bought_ids = await _get_bought_ids(user_id)
     is_admin = user_id in ADMIN_IDS
     txt = "🛍 Витрина магазина:" if page_items else "🛍 Магазин пока пуст."
-    kb = _build_shop_kb(page_items, page, total, is_admin)
+    kb = _build_shop_kb(page_items, bought_ids, page, total, is_admin)
 
     if isinstance(target, CallbackQuery):
         try:
@@ -73,6 +88,45 @@ async def shop_page(callback: CallbackQuery):
     await _show_shop_page(callback, page, callback.from_user.id)
 
 
+@router.callback_query(F.data == "noop_shop")
+async def noop_shop(callback: CallbackQuery):
+    await callback.answer()
+
+
+# ── Мои покупки ──────────────────────────────────────────────────────────────
+@router.callback_query(F.data == "my_purchases")
+async def my_purchases(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    with Session() as session:
+        student = session.query(Student).filter_by(telegram_id=user_id).first()
+        if not student:
+            return await callback.answer("❌ Ты не зарегистрирован.", show_alert=True)
+
+        purchases = session.query(Purchase).filter_by(student_id=student.id).all()
+        items_info = []
+        total_spent = 0
+        for p in purchases:
+            item = session.query(Merchandise).get(p.merch_id)
+            name = item.name if item else "Удалённый товар"
+            items_info.append(f"✅ {name} — {p.total_points} б. ({p.purchased_at.strftime('%d.%m.%Y')})")
+            total_spent += p.total_points
+
+    if not items_info:
+        msg = "🧾 У тебя пока нет покупок."
+    else:
+        msg = f"🧾 *Мои покупки* ({len(items_info)} шт., потрачено {total_spent} б.):\n\n" + "\n".join(items_info)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_shop")]
+    ])
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
+
+
+# ── Просмотр товара ──────────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("view_item_"))
 async def view_item(callback: CallbackQuery):
     parts = callback.data.split("_")
@@ -107,8 +161,9 @@ async def view_item(callback: CallbackQuery):
     prev_id = item_ids[current_idx - 1] if current_idx > 0 else None
     next_id = item_ids[current_idx + 1] if current_idx < len(item_ids) - 1 else None
 
+    stock_emoji = _stock_emoji(item_stock, already_bought)
     caption = (
-        f"{_stock_emoji(item_stock)} *{item_name}*\n\n"
+        f"{stock_emoji} *{item_name}*\n\n"
         f"{item_desc}\n\n"
         f"💰 Цена: {item_price} баллов\n"
         f"📦 Остаток: {item_stock} шт.\n"
@@ -117,18 +172,18 @@ async def view_item(callback: CallbackQuery):
 
     buttons = []
     if already_bought:
-        buttons.append([InlineKeyboardButton(text="✅ Уже куплено", callback_data="noop")])
+        buttons.append([InlineKeyboardButton(text="✅ Уже куплено", callback_data="noop_shop")])
     elif item_stock <= 0:
-        buttons.append([InlineKeyboardButton(text="🚫 Нет в наличии", callback_data="noop")])
+        buttons.append([InlineKeyboardButton(text="🚫 Нет в наличии", callback_data="noop_shop")])
     elif can_buy:
         buttons.append([InlineKeyboardButton(text="🛒 Купить", callback_data=f"confirm_buy_{item_id}")])
     else:
-        buttons.append([InlineKeyboardButton(text="❌ Недостаточно баллов", callback_data="noop")])
+        buttons.append([InlineKeyboardButton(text="❌ Недостаточно баллов", callback_data="noop_shop")])
 
     nav = []
     if prev_id:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"view_item_{prev_id}_{shop_pg}"))
-    nav.append(InlineKeyboardButton(text=f"{current_idx + 1}/{len(item_ids)}", callback_data="noop"))
+    nav.append(InlineKeyboardButton(text=f"{current_idx + 1}/{len(item_ids)}", callback_data="noop_shop"))
     if next_id:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"view_item_{next_id}_{shop_pg}"))
     if nav:
@@ -146,11 +201,6 @@ async def view_item(callback: CallbackQuery):
         await callback.message.answer_photo(photo=photo_file_id, caption=caption, parse_mode="Markdown", reply_markup=kb)
     else:
         await callback.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
-
-
-@router.callback_query(F.data == "noop")
-async def noop(callback: CallbackQuery):
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("confirm_buy_"))
@@ -180,7 +230,7 @@ async def confirm_buy(callback: CallbackQuery):
     await callback.answer(f"✅ Куплено: {item_name}!", show_alert=True)
 
 
-# ── Управление товарами (только raw SQL для надёжности) ──────────────────────
+# ── Управление товарами ──────────────────────────────────────────────────────
 async def _show_manage(message: Message):
     with Session() as session:
         items = session.query(Merchandise).filter(Merchandise.is_deleted == False).all()
@@ -232,7 +282,6 @@ async def edit_item_menu(callback: CallbackQuery, state: FSMContext):
 async def delete_item(callback: CallbackQuery):
     item_id = int(callback.data.split("_")[1])
     with Session() as session:
-        # Мягкое удаление — покупки и статистика сохраняются
         session.execute(text("UPDATE merchandise SET is_deleted = TRUE, stock = 0 WHERE id = :id"), {"id": item_id})
         session.commit()
     await callback.answer("🗑 Товар удалён")
@@ -320,7 +369,6 @@ async def edit_photo_step(message: Message, state: FSMContext):
     await _show_manage(message)
 
 
-# ── Добавление нового товара ─────────────────────────────────────────────────
 @router.callback_query(F.data == "add_item")
 async def add_item_start(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -340,7 +388,7 @@ async def add_item_name(message: Message, state: FSMContext):
 @router.message(ItemCreateState.AWAITING_DESCRIPTION)
 async def add_item_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
-    await message.answer("💰 Цена (число):")
+    await message.answer("💰 Цена:")
     await state.set_state(ItemCreateState.AWAITING_PRICE)
 
 
@@ -380,11 +428,8 @@ async def _finish_item(message: Message, state: FSMContext):
         session.execute(text(
             "INSERT INTO merchandise (name, description, price, stock, photo_file_id, is_deleted, created_at) "
             "VALUES (:name, :desc, :price, :stock, :photo, FALSE, NOW())"
-        ), {
-            "name": data["name"], "desc": data["description"],
-            "price": data["price"], "stock": data["stock"],
-            "photo": data.get("photo_file_id"),
-        })
+        ), {"name": data["name"], "desc": data["description"],
+            "price": data["price"], "stock": data["stock"], "photo": data.get("photo_file_id")})
         session.commit()
     await state.clear()
     await message.answer("✅ Товар добавлен.")
