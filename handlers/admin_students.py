@@ -40,7 +40,6 @@ async def prompt_search(callback: CallbackQuery, state: FSMContext):
     await state.set_state(StudentSearchState.AWAITING_INPUT)
 
 
-# Строго по состоянию — не перехватывает чужие сообщения
 @router.message(StudentSearchState.AWAITING_INPUT)
 async def search_student(message: Message, state: FSMContext):
     query = message.text.strip()
@@ -51,8 +50,7 @@ async def search_student(message: Message, state: FSMContext):
             SELECT id, full_name, barcode, faculty, balance
             FROM students
             WHERE full_name ILIKE :q OR barcode ILIKE :q OR faculty ILIKE :q
-            ORDER BY full_name
-            LIMIT 20
+            ORDER BY full_name LIMIT 20
         """), {"q": f"%{query}%"}).fetchall()
 
     if not rows:
@@ -71,11 +69,7 @@ async def search_student(message: Message, state: FSMContext):
     ]
     buttons.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="find_student")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад",       callback_data="students")])
-
-    await message.answer(
-        f"📋 {count_txt}:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
+    await message.answer(f"📋 {count_txt}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 @router.callback_query(F.data.startswith("stucard_"))
@@ -105,15 +99,19 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💰 Баллы",     callback_data=f"sf_{student_id}_balance"),
-            InlineKeyboardButton(text="🏛 Факультет", callback_data=f"sf_{student_id}_faculty"),
+            InlineKeyboardButton(text="💰 Баллы",       callback_data=f"sf_{student_id}_balance"),
+            InlineKeyboardButton(text="🔄 Обнулить",    callback_data=f"sf_{student_id}_reset"),
         ],
         [
-            InlineKeyboardButton(text="🎓 Роль",      callback_data=f"sf_{student_id}_role"),
-            InlineKeyboardButton(text="🔒 Статус",    callback_data=f"sf_{student_id}_status"),
+            InlineKeyboardButton(text="🏛 Факультет",   callback_data=f"sf_{student_id}_faculty"),
+            InlineKeyboardButton(text="🎓 Роль",        callback_data=f"sf_{student_id}_role"),
         ],
-        [InlineKeyboardButton(text="📝 ФИО",          callback_data=f"sf_{student_id}_full_name")],
-        [InlineKeyboardButton(text="⬅️ К списку",     callback_data="find_student")],
+        [
+            InlineKeyboardButton(text="🔒 Статус",      callback_data=f"sf_{student_id}_status"),
+            InlineKeyboardButton(text="📝 ФИО",         callback_data=f"sf_{student_id}_full_name"),
+        ],
+        [InlineKeyboardButton(text="💬 Написать",       callback_data=f"msg_student_{student_id}")],
+        [InlineKeyboardButton(text="⬅️ К списку",       callback_data="find_student")],
     ])
 
     try:
@@ -123,14 +121,31 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("sf_"))
+# ── Обнуление баллов ─────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("sf_") & F.data.endswith("_reset"))
+async def reset_balance(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    student_id = int(parts[1])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if s:
+            s.balance = 0
+            session.commit()
+    await callback.answer("✅ Баллы обнулены")
+    # Обновляем карточку
+    callback.data = f"stucard_{student_id}"
+    await show_student_card(callback, FSMContext.__new__(FSMContext))
+
+
+# ── Редактирование поля ──────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("sf_") & ~F.data.endswith("_reset"))
 async def quick_edit_field(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_", 2)
     student_id = int(parts[1])
     field = parts[2]
 
     prompts = {
-        "balance":   "💰 Введите новые баллы (500, +100 или -50):",
+        "balance":   "💰 Введите баллы (500, +100 или -50):",
         "faculty":   "🏛 Введите факультет:",
         "role":      "🎓 Роль: student / moderator / admin",
         "status":    "🔒 Статус: active / blocked",
@@ -142,7 +157,6 @@ async def quick_edit_field(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(prompts.get(field, "Введите значение:"))
 
 
-# Строго по состоянию
 @router.message(StudentEditState.AWAITING_VALUE)
 async def save_student_field(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -165,7 +179,7 @@ async def save_student_field(message: Message, state: FSMContext):
                 else:
                     s.balance = int(value)
             except ValueError:
-                return await message.answer("❗ Введите число (500, +100, -50)")
+                return await message.answer("❗ Введите число")
         elif field == "status":
             if value not in ("active", "blocked"):
                 return await message.answer("❗ active или blocked")
@@ -176,13 +190,11 @@ async def save_student_field(message: Message, state: FSMContext):
             s.role = value
         else:
             setattr(s, field, value)
-
         session.commit()
 
     await state.clear()
     await message.answer("✅ Сохранено!")
 
-    # Показываем обновлённую карточку через fake callback
     class FakeCb:
         data = f"stucard_{student_id}"
         from_user = message.from_user
@@ -195,15 +207,51 @@ async def save_student_field(message: Message, state: FSMContext):
     await show_student_card(FakeCb(), state)
 
 
-# ── Импорт из Excel (строго по состоянию) ────────────────────────────────────
+# ── Написать сообщение студенту ──────────────────────────────────────────────
+@router.callback_query(F.data.startswith("msg_student_"))
+async def msg_student_prompt(callback: CallbackQuery, state: FSMContext):
+    student_id = int(callback.data.split("_")[2])
+    await state.update_data(msg_student_id=student_id)
+    await state.set_state("admin_msg_student")
+    await callback.message.answer(
+        "💬 Введите сообщение для студента:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"stucard_{student_id}")]
+        ])
+    )
+
+
+@router.message(F.text, lambda msg: True)
+async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
+    current = await state.get_state()
+    if current != "admin_msg_student":
+        return
+    data = await state.get_data()
+    student_id = data.get("msg_student_id")
+    await state.clear()
+
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if not s or not s.telegram_id:
+            return await message.answer("❌ У студента нет Telegram.")
+
+    try:
+        await bot.send_message(
+            s.telegram_id,
+            f"📩 *Сообщение от администрации:*\n\n{message.text}",
+            parse_mode="Markdown"
+        )
+        await message.answer("✅ Сообщение отправлено!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+# ── Импорт из Excel ──────────────────────────────────────────────────────────
 @router.callback_query(F.data == "import_students")
 async def import_students_prompt(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав")
-    await callback.message.answer(
-        "📥 Отправьте .xlsx файл.\n\n"
-        "Колонки: Фамилия, Имя, Отчество, Факультет/Институт, barcode, Статус"
-    )
+    await callback.message.answer("📥 Отправьте .xlsx файл.")
     await state.set_state(ImportState.AWAITING_FILE)
 
 
@@ -215,7 +263,6 @@ async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
         return await message.answer("❗ Только .xlsx")
 
     await message.answer("⏳ Обрабатываю...")
-
     try:
         file = await bot.get_file(message.document.file_id)
         file_bytes = await bot.download_file(file.file_path)
@@ -223,7 +270,6 @@ async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
         df.columns = df.columns.str.strip()
 
         added = updated = errors = 0
-
         with Session() as session:
             for _, row in df.iterrows():
                 try:
@@ -238,7 +284,6 @@ async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
                     status = str(row.get("Статус", "active") or "active").strip()
                     if status not in ("active", "blocked"):
                         status = "active"
-
                     existing = session.query(Student).filter_by(barcode=barcode).first()
                     if existing:
                         existing.full_name = full_name
@@ -253,8 +298,7 @@ async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
             session.commit()
 
         await state.clear()
-        await message.answer(f"✅ Готово!\n\n➕ Добавлено: {added}\n🔄 Обновлено: {updated}\n❌ Ошибок: {errors}")
-
+        await message.answer(f"✅ Готово!\n➕ {added} | 🔄 {updated} | ❌ {errors}")
     except Exception as e:
         await state.clear()
         await message.answer(f"❌ Ошибка: {e}")
