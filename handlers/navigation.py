@@ -27,6 +27,13 @@ async def cmd_menu(message: Message):
     await send_main_menu(message, is_admin)
 
 
+@router.message(Command("start"))
+async def cmd_start_alias(message: Message, state: FSMContext):
+    """Алиас — перенаправляет в registration"""
+    from handlers.registration import cmd_start
+    await cmd_start(message, state)
+
+
 @router.callback_query(F.data == "menu_back")
 async def go_back(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -42,7 +49,7 @@ async def menu_main(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "admin_panel")
 async def admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
-        return await callback.answer("⛔ Нет прав")
+        return await callback.answer("⛔ Нет прав", show_alert=True)
     try:
         await callback.message.delete()
     except Exception:
@@ -54,6 +61,42 @@ async def admin_panel(callback: CallbackQuery):
             [InlineKeyboardButton(text="📊 Статистика системы", callback_data="stats")],
             [InlineKeyboardButton(text="📤 Загрузить сканы",    callback_data="menu_events")],
             [InlineKeyboardButton(text="📑 Модерация заданий",  callback_data="menu_moderation")],
-            [InlineKeyboardButton(text="⬅️ Назад",             callback_data="menu_back")],
+            [InlineKeyboardButton(text="🔄 Обнулить все баллы", callback_data="reset_all_balances")],
+            [InlineKeyboardButton(text="⬅️ Главное меню",       callback_data="menu_back")],
         ])
     )
+
+
+@router.callback_query(F.data == "reset_all_balances")
+async def confirm_reset_all(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⛔ Нет прав", show_alert=True)
+    await callback.message.answer(
+        "⚠️ *Обнуление баллов всех студентов*\n\n"
+        "Это действие обнулит баллы ВСЕХ студентов и не может быть отменено.\n\n"
+        "Вы уверены?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, обнулить всех", callback_data="do_reset_all"),
+                InlineKeyboardButton(text="❌ Отмена",            callback_data="admin_panel"),
+            ]
+        ])
+    )
+
+
+@router.callback_query(F.data == "do_reset_all")
+async def do_reset_all(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⛔ Нет прав", show_alert=True)
+    from database import Session
+    from sqlalchemy import text
+    with Session() as session:
+        session.execute(text("UPDATE students SET balance = 0"))
+        session.commit()
+    await callback.answer("✅ Баллы всех студентов обнулены!", show_alert=True)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await admin_panel(callback)
