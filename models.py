@@ -17,6 +17,7 @@ class Student(Base):
     role = Column(String(20), default='student')
     status = Column(String(20), default='active')
     notifications_enabled = Column(Boolean, default=True)
+    qr_file_id = Column(String(255), nullable=True)   # кэш file_id QR-кода
     created_at = Column(DateTime, default=datetime.utcnow)
     verifications = relationship("TaskVerification", back_populates="student")
     purchases = relationship("Purchase", back_populates="student")
@@ -34,7 +35,7 @@ class Task(Base):
     correct_answer = Column(Text, nullable=True)
     proof_text = Column(Text, nullable=True)
     deadline = Column(DateTime, nullable=True)
-    show_deadline = Column(Boolean, default=False)  # показывать ли дедлайн пользователям
+    show_deadline = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     verifications = relationship("TaskVerification", back_populates="task")
