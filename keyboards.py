@@ -1,14 +1,17 @@
 # keyboards.py
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+
+# Скрывает нижнее меню (Reply-клавиатуру)
+REMOVE_KEYBOARD = ReplyKeyboardRemove()
 
 
 def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="📄 Задания",        callback_data="menu_tasks")],
-        [InlineKeyboardButton(text="🛍 Магазин",        callback_data="menu_shop")],
-        [InlineKeyboardButton(text="📊 Рейтинг",        callback_data="rating")],
-        [InlineKeyboardButton(text="📥 Посещения",      callback_data="menu_events")],
-        [InlineKeyboardButton(text="📈 Моя статистика", callback_data="my_stats")],
+        [InlineKeyboardButton(text="📄 Задания",         callback_data="menu_tasks")],
+        [InlineKeyboardButton(text="🛍 Магазин",         callback_data="menu_shop")],
+        [InlineKeyboardButton(text="📥 Мероприятия",     callback_data="menu_events")],
+        [InlineKeyboardButton(text="👤 Профиль",         callback_data="my_profile")],
+        [InlineKeyboardButton(text="🆘 Поддержка",       callback_data="support")],
     ]
     if is_admin:
         buttons.append([InlineKeyboardButton(text="👨‍💼 Админ панель", callback_data="admin_panel")])
