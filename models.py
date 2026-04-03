@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
@@ -17,11 +17,12 @@ class Student(Base):
     role = Column(String(20), default='student')
     status = Column(String(20), default='active')
     notifications_enabled = Column(Boolean, default=True)
-    qr_file_id = Column(String(255), nullable=True)   # кэш file_id QR-кода
+    qr_file_id = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     verifications = relationship("TaskVerification", back_populates="student")
     purchases = relationship("Purchase", back_populates="student")
     attendances = relationship("Attendance", back_populates="student")
+    event_participations = relationship("EventParticipant", back_populates="student")
 
 
 class Task(Base):
@@ -39,6 +40,7 @@ class Task(Base):
     is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     verifications = relationship("TaskVerification", back_populates="task")
+    event_links = relationship("EventTask", back_populates="task")
 
 
 class TaskVerification(Base):
@@ -65,6 +67,7 @@ class Merchandise(Base):
     is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     purchases = relationship("Purchase", back_populates="merchandise")
+    event_links = relationship("EventMerch", back_populates="merchandise")
 
 
 class Purchase(Base):
@@ -79,14 +82,79 @@ class Purchase(Base):
     merchandise = relationship("Merchandise", back_populates="purchases")
 
 
+# ── Мероприятия ──────────────────────────────────────────────────────────────
+
 class Event(Base):
     __tablename__ = 'events'
     id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
-    points = Column(Integer, nullable=False)
+    points = Column(Integer, nullable=False, default=0)   # баллы за лекцию
+    status = Column(String(20), default='active')          # active / closed
     created_at = Column(DateTime, default=datetime.utcnow)
+    participants = relationship("EventParticipant", back_populates="event")
+    lectures = relationship("Lecture", back_populates="event")
+    event_tasks = relationship("EventTask", back_populates="event")
+    event_merch = relationship("EventMerch", back_populates="event")
     attendances = relationship("Attendance", back_populates="event")
     unmatched = relationship("UnmatchedBarcode", back_populates="event")
+
+
+class EventParticipant(Base):
+    """Студент зарегистрирован на мероприятие. Хранит индивидуальный баланс мероприятия."""
+    __tablename__ = 'event_participants'
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
+    student_id = Column(Integer, ForeignKey('students.id'), nullable=False)
+    event_balance = Column(Integer, default=0)   # баллы этого мероприятия (сгорают при закрытии)
+    registered_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint('event_id', 'student_id', name='uq_event_student'),)
+    event = relationship("Event", back_populates="participants")
+    student = relationship("Student", back_populates="event_participations")
+
+
+class Lecture(Base):
+    """Лекция внутри мероприятия — за посещение начисляются баллы."""
+    __tablename__ = 'lectures'
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
+    title = Column(String(255), nullable=False)
+    points = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    event = relationship("Event", back_populates="lectures")
+    scans = relationship("LectureScan", back_populates="lecture")
+
+
+class LectureScan(Base):
+    """Факт посещения лекции студентом — уникален (нельзя дважды)."""
+    __tablename__ = 'lecture_scans'
+    id = Column(Integer, primary_key=True)
+    lecture_id = Column(Integer, ForeignKey('lectures.id'), nullable=False)
+    student_id = Column(Integer, ForeignKey('students.id'), nullable=False)
+    scanned_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint('lecture_id', 'student_id', name='uq_lecture_student'),)
+    lecture = relationship("Lecture", back_populates="scans")
+
+
+class EventTask(Base):
+    """Задание привязано к мероприятию — доступно только участникам."""
+    __tablename__ = 'event_tasks'
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=False)
+    __table_args__ = (UniqueConstraint('event_id', 'task_id', name='uq_event_task'),)
+    event = relationship("Event", back_populates="event_tasks")
+    task = relationship("Task", back_populates="event_links")
+
+
+class EventMerch(Base):
+    """Товар привязан к мероприятию — доступен только участникам."""
+    __tablename__ = 'event_merch'
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
+    merch_id = Column(Integer, ForeignKey('merchandise.id'), nullable=False)
+    __table_args__ = (UniqueConstraint('event_id', 'merch_id', name='uq_event_merch'),)
+    event = relationship("Event", back_populates="event_merch")
+    merchandise = relationship("Merchandise", back_populates="event_links")
 
 
 class Attendance(Base):
