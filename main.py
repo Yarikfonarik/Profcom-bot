@@ -33,13 +33,14 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
+    # Порядок важен — более специфичные роутеры первыми
     dp.include_router(registration.router)
     dp.include_router(navigation.router)
     dp.include_router(support.router)
+    dp.include_router(events.router)       # мероприятия
     dp.include_router(tasks.router)
     dp.include_router(shop.router)
     dp.include_router(statistics.router)
-    dp.include_router(events.router)
     dp.include_router(admin_students.router)
     dp.include_router(notifications.router)
 
