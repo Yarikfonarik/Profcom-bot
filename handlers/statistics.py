@@ -4,7 +4,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from sqlalchemy import text, desc
 
 from database import Session
-from models import Student, Purchase
+from models import Student, Purchase, Event, EventParticipant
 from config import ADMIN_IDS
 
 router = Router()
@@ -14,12 +14,11 @@ BACK_KB = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
-async def send_profile(target_message, user_id: int, bot: Bot, edit: bool = False):
-    """Отправляет профиль с QR-кодом. Используется из нескольких мест."""
+async def send_profile(message, user_id: int, bot: Bot):
     with Session() as session:
         student = session.query(Student).filter_by(telegram_id=user_id).first()
         if not student:
-            await target_message.answer("❌ Ты не зарегистрирован.")
+            await message.answer("❌ Ты не зарегистрирован.")
             return
 
         rank = session.execute(
@@ -39,20 +38,38 @@ async def send_profile(target_message, user_id: int, bot: Bot, edit: bool = Fals
             {"id": student.id}
         ).scalar()
 
-        caption = (
-            f"👤 {student.full_name}\n"
-            f"🔢 Баркод: {student.barcode}\n"
-            f"🏛 Факультет: {student.faculty or '—'}\n\n"
-            f"💰 Баллов: {student.balance}\n"
-            f"🏆 Место в рейтинге: #{rank}\n"
-            f"📝 Заданий выполнено: {tasks_done}\n"
-            f"🛍 Покупок: {purchases_count}\n"
-            f"📥 Мероприятий посещено: {attended}"
-        )
+        # Балансы активных мероприятий
+        active_events = session.execute(text("""
+            SELECT e.title, ep.event_balance
+            FROM event_participants ep
+            JOIN events e ON e.id = ep.event_id
+            WHERE ep.student_id = :sid AND e.status = 'active'
+        """), {"sid": student.id}).fetchall()
 
         student_id = student.id
         barcode = student.barcode
         qr_file_id = student.qr_file_id
+        full_name = student.full_name
+        balance = student.balance
+
+    caption = (
+        f"👤 {full_name}\n"
+        f"🔢 Баркод: {barcode}\n"
+        f"🏛 Факультет: {student.faculty or '—'}\n\n"
+        f"💰 Основной баланс: {balance}\n"
+        f"🏆 Место в рейтинге: #{rank}\n"
+    )
+
+    if active_events:
+        caption += "\n🎪 Баллы мероприятий:\n"
+        for ev_title, ev_balance in active_events:
+            caption += f"  • {ev_title}: {ev_balance} б.\n"
+
+    caption += (
+        f"\n📝 Заданий выполнено: {tasks_done}\n"
+        f"🛍 Покупок: {purchases_count}\n"
+        f"📥 Мероприятий посещено: {attended}"
+    )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏆 Общий рейтинг",     callback_data="rating_all")],
@@ -62,36 +79,30 @@ async def send_profile(target_message, user_id: int, bot: Bot, edit: bool = Fals
         [InlineKeyboardButton(text="⬅️ Назад",             callback_data="menu_back")],
     ])
 
-    # Пробуем отправить с кэшированным QR
     if qr_file_id:
         try:
-            await target_message.answer_photo(photo=qr_file_id, caption=caption, reply_markup=kb)
+            await message.answer_photo(photo=qr_file_id, caption=caption, reply_markup=kb)
             return
         except Exception:
-            # file_id устарел — сбрасываем
             with Session() as session:
                 s = session.query(Student).get(student_id)
                 if s:
                     s.qr_file_id = None
                     session.commit()
 
-    # Генерируем новый QR
     try:
         from qr_generator import generate_qr_bytes
         qr_bytes = generate_qr_bytes(barcode)
         file = BufferedInputFile(qr_bytes, filename=f"qr_{barcode}.png")
-        msg = await target_message.answer_photo(photo=file, caption=caption, reply_markup=kb)
-
-        # Кэшируем file_id
+        msg = await message.answer_photo(photo=file, caption=caption, reply_markup=kb)
         new_file_id = msg.photo[-1].file_id
         with Session() as session:
             s = session.query(Student).get(student_id)
             if s:
                 s.qr_file_id = new_file_id
                 session.commit()
-    except Exception as e:
-        # QR не удалось — показываем без фото
-        await target_message.answer(caption, reply_markup=kb)
+    except Exception:
+        await message.answer(caption, reply_markup=kb)
 
 
 @router.callback_query(F.data == "my_profile")
@@ -115,7 +126,7 @@ async def refresh_qr(callback: CallbackQuery, bot: Bot):
         await callback.message.delete()
     except Exception:
         pass
-    await callback.answer("🔄 Обновляю QR...")
+    await callback.answer("🔄 Обновляю...")
     await send_profile(callback.message, user_id, bot)
 
 
@@ -150,7 +161,7 @@ async def show_faculty_rating(callback: CallbackQuery):
 
     msg = f"🏛 Топ‑10 «{faculty}»:\n\n" + "\n".join(
         f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)
-    ) if top else f"🏛 Рейтинг «{faculty}» пуст."
+    ) if top else f"Рейтинг «{faculty}» пуст."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]
@@ -162,6 +173,34 @@ async def show_faculty_rating(callback: CallbackQuery):
     await callback.message.answer(msg, reply_markup=kb)
 
 
+@router.callback_query(F.data == "my_purchases")
+async def my_purchases(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    with Session() as session:
+        student = session.query(Student).filter_by(telegram_id=user_id).first()
+        if not student:
+            return await callback.answer("❌ Ты не зарегистрирован.", show_alert=True)
+        purchases = session.query(Purchase).filter_by(student_id=student.id).all()
+        items_info = []
+        total_spent = 0
+        for p in purchases:
+            from models import Merchandise
+            item = session.query(Merchandise).get(p.merch_id)
+            name = item.name if item else "Удалённый товар"
+            items_info.append(f"✅ {name} — {p.total_points} б. ({p.purchased_at.strftime('%d.%m.%Y')})")
+            total_spent += p.total_points
+
+    msg = f"🧾 *Мои покупки* ({len(items_info)} шт., потрачено {total_spent} б.):\n\n" + "\n".join(items_info) if items_info else "🧾 У тебя пока нет покупок."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]
+    ])
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
+
+
 @router.callback_query(F.data == "stats")
 async def show_admin_stats(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -170,26 +209,19 @@ async def show_admin_stats(callback: CallbackQuery):
     with Session() as session:
         total = session.query(Student).count()
         active = session.query(Student).filter_by(status="active").count()
-        staff = session.query(Student).filter(Student.role.in_(["admin", "moderator"])).count()
         tasks = session.execute(text("SELECT COUNT(*) FROM task_verifications WHERE status = 'approved'")).scalar()
         purchases = session.execute(text("SELECT COUNT(*) FROM purchases")).scalar()
-        events = session.execute(text("SELECT COUNT(*) FROM attendance")).scalar()
-        top_faculties = session.execute(text(
-            "SELECT faculty, SUM(balance) AS total FROM students WHERE faculty IS NOT NULL GROUP BY faculty ORDER BY total DESC LIMIT 3"
-        )).fetchall()
+        active_events = session.query(Event).filter_by(status='active').count()
+        total_participants = session.execute(text("SELECT COUNT(*) FROM event_participants")).scalar()
 
     msg = (
         f"📊 Статистика системы\n\n"
-        f"👥 Всего: {total} | Активных: {active}\n"
-        f"🧑‍💼 Адм. и модераторов: {staff}\n"
+        f"👥 Студентов: {total} (активных: {active})\n"
         f"📝 Заданий выполнено: {tasks}\n"
         f"🛍 Покупок: {purchases}\n"
-        f"📥 Посещений: {events}\n"
+        f"🎪 Активных мероприятий: {active_events}\n"
+        f"👥 Всего регистраций на мероприятия: {total_participants}\n"
     )
-    if top_faculties:
-        msg += "\n🏛 Топ факультетов:\n"
-        for idx, (name, tp) in enumerate(top_faculties, 1):
-            msg += f"{idx}. {name} — {tp} б.\n"
 
     try:
         await callback.message.delete()
