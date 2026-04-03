@@ -1,11 +1,6 @@
 # states.py
 from aiogram.fsm.state import StatesGroup, State
 
-class UploadState(StatesGroup):
-    AWAITING_TITLE = State()
-    AWAITING_POINTS = State()
-    AWAITING_FILE = State()
-
 class TaskState(StatesGroup):
     AWAITING_TITLE = State()
     AWAITING_DESCRIPTION = State()
@@ -23,8 +18,8 @@ class ItemCreateState(StatesGroup):
     AWAITING_NAME = State()
     AWAITING_DESCRIPTION = State()
     AWAITING_PRICE = State()
-    AWAITING_IMAGE = State()
     AWAITING_STOCK = State()
+    AWAITING_IMAGE = State()
 
 class ItemEditState(StatesGroup):
     AWAITING_FIELD = State()
@@ -34,15 +29,6 @@ class ItemEditState(StatesGroup):
     editing_price = State()
     editing_stock = State()
     editing_photo = State()
-
-class EventUploadState(StatesGroup):
-    AWAITING_TITLE = State()
-    AWAITING_POINTS = State()
-    AWAITING_FILE = State()
-
-class ManualBarcodeState(StatesGroup):
-    AWAITING_EVENT_ID = State()
-    AWAITING_BARCODE = State()
 
 class StudentVerificationState(StatesGroup):
     AWAITING_BARCODE = State()
@@ -63,3 +49,17 @@ class SupportState(StatesGroup):
 
 class AdminMsgState(StatesGroup):
     AWAITING_MESSAGE = State()
+
+# ── Мероприятия ──────────────────────────────────────────────────────────────
+class EventCreateState(StatesGroup):
+    AWAITING_TITLE = State()
+    AWAITING_POINTS = State()
+
+class LectureCreateState(StatesGroup):
+    AWAITING_TITLE = State()
+    AWAITING_POINTS = State()
+
+class EventScanState(StatesGroup):
+    """Режим сканирования участников / лекций."""
+    REGISTER_PARTICIPANTS = State()   # регистрация участников на мероприятие
+    SCAN_LECTURE = State()            # сканирование посещаемости лекции
