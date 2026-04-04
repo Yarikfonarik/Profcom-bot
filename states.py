@@ -63,3 +63,19 @@ class EventScanState(StatesGroup):
     """Режим сканирования участников / лекций."""
     REGISTER_PARTICIPANTS = State()   # регистрация участников на мероприятие
     SCAN_LECTURE = State()            # сканирование посещаемости лекции
+
+
+class EventCreateState(StatesGroup):
+    AWAITING_TITLE = State()
+    AWAITING_POINTS = State()
+    AWAITING_HIDDEN = State()
+
+
+class LectureCreateState(StatesGroup):
+    AWAITING_TITLE = State()
+    AWAITING_POINTS = State()
+
+
+class EventScanState(StatesGroup):
+    REGISTER_PARTICIPANTS = State()
+    SCAN_LECTURE = State()
