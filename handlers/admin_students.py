@@ -3,7 +3,9 @@ import io
 import pandas as pd
 
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
+)
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import text
 
@@ -42,7 +44,6 @@ async def prompt_search(callback: CallbackQuery, state: FSMContext):
 
 @router.message(StudentSearchState.AWAITING_INPUT)
 async def search_student(message: Message, state: FSMContext):
-    # Убираем лишние пробелы из запроса
     query = " ".join(message.text.strip().split())
     await state.clear()
 
@@ -56,7 +57,7 @@ async def search_student(message: Message, state: FSMContext):
 
     if not rows:
         return await message.answer(
-            "❌ Студенты не найдены.",
+            "❌ Не найдено.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔍 Снова", callback_data="find_student")],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="students")],
@@ -73,8 +74,33 @@ async def search_student(message: Message, state: FSMContext):
     await message.answer(f"📋 {count_txt}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
+async def _generate_qr_for_student(student, bot: Bot, message) -> str | None:
+    """Генерирует QR и кэширует file_id. Возвращает file_id или None."""
+    if student.qr_file_id:
+        return student.qr_file_id
+    try:
+        from qr_generator import generate_qr_bytes
+        qr_bytes = generate_qr_bytes(student.barcode)
+        file = BufferedInputFile(qr_bytes, filename=f"qr_{student.barcode}.png")
+        # Отправляем фото через message и забираем file_id
+        sent = await message.answer_photo(photo=file, caption="⏳")
+        file_id = sent.photo[-1].file_id
+        try:
+            await sent.delete()
+        except Exception:
+            pass
+        with Session() as session:
+            s = session.query(Student).get(student.id)
+            if s:
+                s.qr_file_id = file_id
+                session.commit()
+        return file_id
+    except Exception:
+        return None
+
+
 @router.callback_query(F.data.startswith("stucard_"))
-async def show_student_card(callback: CallbackQuery, state: FSMContext):
+async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot):
     student_id = int(callback.data.split("_")[1])
 
     with Session() as session:
@@ -82,19 +108,19 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
         if not s:
             return await callback.answer("Студент не найден", show_alert=True)
 
-        status_icon = "✅" if s.status == "active" else "⛔"
         role_icon = {"student": "🎓", "moderator": "🛡", "admin": "👑"}.get(s.role, "🎓")
         tg = str(s.telegram_id) if s.telegram_id else "не привязан"
-
-        msg = (
-            f"👤 *{s.full_name}*\n\n"
-            f"🔢 Баркод: `{s.barcode}`\n"
-            f"🏛 Факультет: {s.faculty or '—'}\n"
-            f"💰 Баллы: *{s.balance}*\n"
+        caption = (
+            f"👤 {s.full_name}\n"
+            f"🔢 Баркод: {s.barcode}\n"
+            f"🏛 Факультет: {s.faculty or '—'}\n\n"
+            f"💰 Баллы: {s.balance}\n"
             f"{role_icon} Роль: {s.role}\n"
-            f"{status_icon} Статус: {s.status}\n"
-            f"📱 Telegram ID: {tg}"
+            f"{'✅' if s.status == 'active' else '⛔'} Статус: {s.status}\n"
+            f"📱 Telegram: {tg}"
         )
+        barcode = s.barcode
+        qr_file_id = s.qr_file_id
 
     await state.update_data(student_id=student_id)
 
@@ -111,6 +137,7 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="🔒 Статус",      callback_data=f"sf_{student_id}_status"),
             InlineKeyboardButton(text="📝 ФИО",         callback_data=f"sf_{student_id}_full_name"),
         ],
+        [InlineKeyboardButton(text="🔄 Обновить QR",    callback_data=f"admin_refresh_qr_{student_id}")],
         [InlineKeyboardButton(text="💬 Написать",       callback_data=f"smsg_{student_id}")],
         [
             InlineKeyboardButton(text="🔍 Найти ещё",   callback_data="find_student"),
@@ -122,12 +149,59 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext):
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
+
+    # Показываем карточку с QR
+    if qr_file_id:
+        try:
+            await callback.message.answer_photo(photo=qr_file_id, caption=caption, reply_markup=kb)
+            return
+        except Exception:
+            with Session() as session:
+                st = session.query(Student).get(student_id)
+                if st:
+                    st.qr_file_id = None
+                    session.commit()
+            qr_file_id = None
+
+    # Генерируем QR
+    if barcode:
+        try:
+            from qr_generator import generate_qr_bytes
+            qr_bytes = generate_qr_bytes(barcode)
+            file = BufferedInputFile(qr_bytes, filename=f"qr_{barcode}.png")
+            msg = await callback.message.answer_photo(photo=file, caption=caption, reply_markup=kb)
+            new_file_id = msg.photo[-1].file_id
+            with Session() as session:
+                st = session.query(Student).get(student_id)
+                if st:
+                    st.qr_file_id = new_file_id
+                    session.commit()
+            return
+        except Exception:
+            pass
+
+    await callback.message.answer(caption, reply_markup=kb)
 
 
-# ── Обнуление баллов одного студента ────────────────────────────────────────
+# ── Обновить QR (только через карточку студента в админ панели) ──────────────
+@router.callback_query(F.data.startswith("admin_refresh_qr_"))
+async def admin_refresh_qr(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⛔ Нет прав", show_alert=True)
+    student_id = int(callback.data.split("_")[3])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if s:
+            s.qr_file_id = None
+            session.commit()
+    await callback.answer("🔄 QR сброшен, открываю заново...")
+    callback.data = f"stucard_{student_id}"
+    await show_student_card(callback, state, bot)
+
+
+# ── Обнуление баллов студента ────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("sreset_"))
-async def reset_one_balance(callback: CallbackQuery, state: FSMContext):
+async def reset_one_balance(callback: CallbackQuery, state: FSMContext, bot: Bot):
     student_id = int(callback.data.split("_")[1])
     with Session() as session:
         s = session.query(Student).get(student_id)
@@ -136,7 +210,7 @@ async def reset_one_balance(callback: CallbackQuery, state: FSMContext):
             session.commit()
     await callback.answer("✅ Баллы обнулены")
     callback.data = f"stucard_{student_id}"
-    await show_student_card(callback, state)
+    await show_student_card(callback, state, bot)
 
 
 # ── Редактирование поля ──────────────────────────────────────────────────────
@@ -147,20 +221,19 @@ async def quick_edit_field(callback: CallbackQuery, state: FSMContext):
     field = parts[2]
 
     prompts = {
-        "balance":   "💰 Введите баллы (500, +100 или -50):",
+        "balance":   "💰 Введите баллы (500, +100, -50):",
         "faculty":   "🏛 Введите факультет:",
         "role":      "🎓 Роль: student / moderator / admin",
         "status":    "🔒 Статус: active / blocked",
         "full_name": "📝 Введите ФИО:",
     }
-
     await state.update_data(student_id=student_id, field=field)
     await state.set_state(StudentEditState.AWAITING_VALUE)
     await callback.message.answer(prompts.get(field, "Введите значение:"))
 
 
 @router.message(StudentEditState.AWAITING_VALUE)
-async def save_student_field(message: Message, state: FSMContext):
+async def save_student_field(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     field = data["field"]
     value = message.text.strip()
@@ -203,10 +276,11 @@ async def save_student_field(message: Message, state: FSMContext):
         class _msg:
             async def delete(self): pass
             answer = message.answer
+            answer_photo = message.answer_photo
         message = _msg()
         async def answer(self, *a, **kw): pass
 
-    await show_student_card(FakeCb(), state)
+    await show_student_card(FakeCb(), state, bot)
 
 
 # ── Написать студенту ────────────────────────────────────────────────────────
@@ -216,7 +290,7 @@ async def msg_student_prompt(callback: CallbackQuery, state: FSMContext):
     await state.update_data(msg_student_id=student_id)
     await state.set_state(AdminMsgState.AWAITING_MESSAGE)
     await callback.message.answer(
-        "💬 Введите сообщение для студента (текст или фото):",
+        "💬 Введите сообщение (текст или фото):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data=f"stucard_{student_id}")]
         ])
@@ -238,12 +312,9 @@ async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
 
     mod_name = message.from_user.full_name or "Администрация"
     header = f"📩 *Сообщение от администрации ({mod_name}):*\n\n"
-
-    # Кнопка ответить — ведёт обратно в поддержку
     reply_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Ответить", callback_data="support")]
     ])
-
     try:
         if message.text:
             await bot.send_message(target_id, header + message.text, parse_mode="Markdown", reply_markup=reply_kb)
@@ -253,7 +324,7 @@ async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
         elif message.document:
             await bot.send_document(target_id, message.document.file_id,
                 caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=reply_kb)
-        await message.answer(f"✅ Сообщение отправлено студенту {student_name}!")
+        await message.answer(f"✅ Отправлено {student_name}!")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
@@ -273,14 +344,12 @@ async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
         return
     if not message.document.file_name.endswith(".xlsx"):
         return await message.answer("❗ Только .xlsx")
-
     await message.answer("⏳ Обрабатываю...")
     try:
         file = await bot.get_file(message.document.file_id)
         file_bytes = await bot.download_file(file.file_path)
         df = pd.read_excel(io.BytesIO(file_bytes.read()), dtype=str)
         df.columns = df.columns.str.strip()
-
         added = updated = errors = 0
         with Session() as session:
             for _, row in df.iterrows():
@@ -308,7 +377,6 @@ async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
                 except Exception:
                     errors += 1
             session.commit()
-
         await state.clear()
         await message.answer(f"✅ Готово!\n➕ {added} | 🔄 {updated} | ❌ {errors}")
     except Exception as e:
