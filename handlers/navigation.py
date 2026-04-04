@@ -58,18 +58,20 @@ async def admin_panel(callback: CallbackQuery):
             [InlineKeyboardButton(text="🔄 Обнулить все баллы",   callback_data="reset_all_balances")],
             [InlineKeyboardButton(text="🗑 Обнулить все задания",  callback_data="reset_all_tasks")],
             [InlineKeyboardButton(text="🗑 Обнулить весь магазин", callback_data="reset_all_shop")],
+            [InlineKeyboardButton(text="🎪 Обнулить мероприятия", callback_data="reset_all_events")],
             [InlineKeyboardButton(text="⬅️ Главное меню",         callback_data="menu_back")],
         ])
     )
 
 
-# ── Обнуление баллов всех ────────────────────────────────────────────────────
+# ── Обнуление баллов ─────────────────────────────────────────────────────────
 @router.callback_query(F.data == "reset_all_balances")
 async def confirm_reset_balances(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав", show_alert=True)
     await callback.message.answer(
-        "⚠️ Обнуление баллов ВСЕХ студентов. Нельзя отменить. Уверены?",
+        "⚠️ Обнулить баллы ВСЕХ студентов?\n\n"
+        "Основной баланс + баллы всех мероприятий будут обнулены.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Да", callback_data="do_reset_balances"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"),
@@ -83,8 +85,9 @@ async def do_reset_balances(callback: CallbackQuery):
         return await callback.answer("⛔ Нет прав", show_alert=True)
     with Session() as session:
         session.execute(text("UPDATE students SET balance = 0"))
+        session.execute(text("UPDATE event_participants SET event_balance = 0"))
         session.commit()
-    await callback.answer("✅ Баллы всех студентов обнулены!", show_alert=True)
+    await callback.answer("✅ Все баллы обнулены!", show_alert=True)
     try:
         await callback.message.delete()
     except Exception:
@@ -98,7 +101,7 @@ async def confirm_reset_tasks(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав", show_alert=True)
     await callback.message.answer(
-        "⚠️ Удалить ВСЕ задания и результаты выполнения. Нельзя отменить. Уверены?",
+        "⚠️ Удалить ВСЕ задания и результаты выполнения?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Да", callback_data="do_reset_tasks"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"),
@@ -128,7 +131,7 @@ async def confirm_reset_shop(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав", show_alert=True)
     await callback.message.answer(
-        "⚠️ Удалить ВСЕ товары и покупки. Нельзя отменить. Уверены?",
+        "⚠️ Удалить ВСЕ товары и покупки?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Да", callback_data="do_reset_shop"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"),
@@ -145,6 +148,36 @@ async def do_reset_shop(callback: CallbackQuery):
         session.execute(text("UPDATE merchandise SET is_deleted = TRUE, stock = 0"))
         session.commit()
     await callback.answer("✅ Магазин очищен!", show_alert=True)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await admin_panel(callback)
+
+
+# ── Обнуление мероприятий ────────────────────────────────────────────────────
+@router.callback_query(F.data == "reset_all_events")
+async def confirm_reset_events(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⛔ Нет прав", show_alert=True)
+    await callback.message.answer(
+        "⚠️ Закрыть ВСЕ активные мероприятия и обнулить баллы участников?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да", callback_data="do_reset_events"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel"),
+        ]])
+    )
+
+
+@router.callback_query(F.data == "do_reset_events")
+async def do_reset_events(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⛔ Нет прав", show_alert=True)
+    with Session() as session:
+        session.execute(text("UPDATE events SET status = 'closed' WHERE status = 'active'"))
+        session.execute(text("UPDATE event_participants SET event_balance = 0"))
+        session.commit()
+    await callback.answer("✅ Все мероприятия закрыты!", show_alert=True)
     try:
         await callback.message.delete()
     except Exception:
