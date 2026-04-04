@@ -38,7 +38,6 @@ async def send_profile(message, user_id: int, bot: Bot):
             {"id": student.id}
         ).scalar()
 
-        # Балансы активных мероприятий
         active_events = session.execute(text("""
             SELECT e.title, ep.event_balance
             FROM event_participants ep
@@ -51,15 +50,15 @@ async def send_profile(message, user_id: int, bot: Bot):
         qr_file_id = student.qr_file_id
         full_name = student.full_name
         balance = student.balance
+        faculty = student.faculty
 
     caption = (
         f"👤 {full_name}\n"
         f"🔢 Баркод: {barcode}\n"
-        f"🏛 Факультет: {student.faculty or '—'}\n\n"
+        f"🏛 Факультет: {faculty or '—'}\n\n"
         f"💰 Основной баланс: {balance}\n"
         f"🏆 Место в рейтинге: #{rank}\n"
     )
-
     if active_events:
         caption += "\n🎪 Баллы мероприятий:\n"
         for ev_title, ev_balance in active_events:
@@ -71,14 +70,15 @@ async def send_profile(message, user_id: int, bot: Bot):
         f"📥 Мероприятий посещено: {attended}"
     )
 
+    # Кнопка обновить QR убрана — доступна только модератору через поиск студента
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏆 Общий рейтинг",     callback_data="rating_all")],
         [InlineKeyboardButton(text="🏛 Рейтинг факультета", callback_data="rating_faculty")],
         [InlineKeyboardButton(text="🧾 Мои покупки",        callback_data="my_purchases")],
-        [InlineKeyboardButton(text="🔄 Обновить QR",        callback_data="refresh_qr")],
         [InlineKeyboardButton(text="⬅️ Назад",             callback_data="menu_back")],
     ])
 
+    # Отправляем с QR
     if qr_file_id:
         try:
             await message.answer_photo(photo=qr_file_id, caption=caption, reply_markup=kb)
@@ -114,34 +114,12 @@ async def show_my_profile(callback: CallbackQuery, bot: Bot):
     await send_profile(callback.message, callback.from_user.id, bot)
 
 
-@router.callback_query(F.data == "refresh_qr")
-async def refresh_qr(callback: CallbackQuery, bot: Bot):
-    user_id = callback.from_user.id
-    with Session() as session:
-        student = session.query(Student).filter_by(telegram_id=user_id).first()
-        if student:
-            student.qr_file_id = None
-            session.commit()
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await callback.answer("🔄 Обновляю...")
-    await send_profile(callback.message, user_id, bot)
-
-
 @router.callback_query(F.data == "rating_all")
 async def show_global_rating(callback: CallbackQuery):
     with Session() as session:
         top = session.query(Student).filter(Student.status == "active").order_by(desc(Student.balance)).limit(10).all()
-
-    msg = "🏆 Топ‑10 студентов:\n\n" + "\n".join(
-        f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)
-    ) if top else "🏆 Рейтинг пока пуст."
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]
-    ])
+    msg = "🏆 Топ‑10:\n\n" + "\n".join(f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)) if top else "Рейтинг пуст."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]])
     try:
         await callback.message.delete()
     except Exception:
@@ -158,14 +136,8 @@ async def show_faculty_rating(callback: CallbackQuery):
             return await callback.answer("❌ Ты не зарегистрирован.", show_alert=True)
         top = session.query(Student).filter_by(faculty=me.faculty, status="active").order_by(desc(Student.balance)).limit(10).all()
         faculty = me.faculty
-
-    msg = f"🏛 Топ‑10 «{faculty}»:\n\n" + "\n".join(
-        f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)
-    ) if top else f"Рейтинг «{faculty}» пуст."
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]
-    ])
+    msg = f"🏛 Топ‑10 «{faculty}»:\n\n" + "\n".join(f"{i}. {s.full_name} — {s.balance} б." for i, s in enumerate(top, 1)) if top else f"Рейтинг «{faculty}» пуст."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]])
     try:
         await callback.message.delete()
     except Exception:
@@ -189,11 +161,8 @@ async def my_purchases(callback: CallbackQuery):
             name = item.name if item else "Удалённый товар"
             items_info.append(f"✅ {name} — {p.total_points} б. ({p.purchased_at.strftime('%d.%m.%Y')})")
             total_spent += p.total_points
-
-    msg = f"🧾 *Мои покупки* ({len(items_info)} шт., потрачено {total_spent} б.):\n\n" + "\n".join(items_info) if items_info else "🧾 У тебя пока нет покупок."
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]
-    ])
+    msg = f"🧾 *Мои покупки* ({len(items_info)} шт., {total_spent} б.):\n\n" + "\n".join(items_info) if items_info else "🧾 Покупок пока нет."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]])
     try:
         await callback.message.delete()
     except Exception:
@@ -205,24 +174,21 @@ async def my_purchases(callback: CallbackQuery):
 async def show_admin_stats(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав")
-
     with Session() as session:
         total = session.query(Student).count()
         active = session.query(Student).filter_by(status="active").count()
         tasks = session.execute(text("SELECT COUNT(*) FROM task_verifications WHERE status = 'approved'")).scalar()
         purchases = session.execute(text("SELECT COUNT(*) FROM purchases")).scalar()
         active_events = session.query(Event).filter_by(status='active').count()
-        total_participants = session.execute(text("SELECT COUNT(*) FROM event_participants")).scalar()
-
+        total_parts = session.execute(text("SELECT COUNT(*) FROM event_participants")).scalar()
     msg = (
-        f"📊 Статистика системы\n\n"
+        f"📊 Статистика\n\n"
         f"👥 Студентов: {total} (активных: {active})\n"
         f"📝 Заданий выполнено: {tasks}\n"
         f"🛍 Покупок: {purchases}\n"
         f"🎪 Активных мероприятий: {active_events}\n"
-        f"👥 Всего регистраций на мероприятия: {total_participants}\n"
+        f"👥 Регистраций на мероприятия: {total_parts}\n"
     )
-
     try:
         await callback.message.delete()
     except Exception:
