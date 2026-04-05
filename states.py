@@ -50,32 +50,24 @@ class SupportState(StatesGroup):
 class AdminMsgState(StatesGroup):
     AWAITING_MESSAGE = State()
 
-# ── Мероприятия ──────────────────────────────────────────────────────────────
-class EventCreateState(StatesGroup):
-    AWAITING_TITLE = State()
-    AWAITING_POINTS = State()
-
-class LectureCreateState(StatesGroup):
-    AWAITING_TITLE = State()
-    AWAITING_POINTS = State()
-
-class EventScanState(StatesGroup):
-    """Режим сканирования участников / лекций."""
-    REGISTER_PARTICIPANTS = State()   # регистрация участников на мероприятие
-    SCAN_LECTURE = State()            # сканирование посещаемости лекции
-
-
 class EventCreateState(StatesGroup):
     AWAITING_TITLE = State()
     AWAITING_POINTS = State()
     AWAITING_HIDDEN = State()
-
+    AWAITING_FEATURES = State()
+    AWAITING_DATE = State()
+    AWAITING_DESCRIPTION = State()
+    AWAITING_IMAGE = State()
+    AWAITING_HOW_TO_JOIN = State()
 
 class LectureCreateState(StatesGroup):
     AWAITING_TITLE = State()
     AWAITING_POINTS = State()
 
-
 class EventScanState(StatesGroup):
     REGISTER_PARTICIPANTS = State()
     SCAN_LECTURE = State()
+
+class EventMerchEditState(StatesGroup):
+    AWAITING_STOCK = State()
+    AWAITING_PRICE = State()
