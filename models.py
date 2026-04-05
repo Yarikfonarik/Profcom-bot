@@ -50,6 +50,7 @@ class TaskVerification(Base):
     task_id = Column(Integer, ForeignKey('tasks.id'), nullable=False)
     proof_text = Column(Text)
     proof_file = Column(String(255))
+    proof_type = Column(String(20), default='photo')  # photo / video
     status = Column(String(20), default='pending')
     submitted_at = Column(DateTime, default=datetime.utcnow)
     student = relationship("Student", back_populates="verifications")
@@ -86,9 +87,16 @@ class Event(Base):
     __tablename__ = 'events'
     id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
-    points = Column(Integer, nullable=False, default=0)
+    description = Column(Text, nullable=True)        # краткое описание
+    image_file_id = Column(String(255), nullable=True)  # картинка мероприятия
+    event_date = Column(String(100), nullable=True)  # дата и время (строка для гибкости)
+    how_to_join = Column(Text, nullable=True)         # как попасть
+    points = Column(Integer, nullable=False, default=0)  # стартовые баллы за участие
     status = Column(String(20), default='active')
-    hidden = Column(Boolean, default=False)   # скрытое — видно только участникам и админу
+    hidden = Column(Boolean, default=False)
+    has_tasks = Column(Boolean, default=True)        # включены ли задания
+    has_lectures = Column(Boolean, default=True)     # включены ли лекции
+    has_shop = Column(Boolean, default=True)         # включён ли магазин
     created_at = Column(DateTime, default=datetime.utcnow)
     participants = relationship("EventParticipant", back_populates="event")
     lectures = relationship("Lecture", back_populates="event")
@@ -146,9 +154,34 @@ class EventMerch(Base):
     id = Column(Integer, primary_key=True)
     event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
     merch_id = Column(Integer, ForeignKey('merchandise.id'), nullable=False)
+    custom_stock = Column(Integer, nullable=True)   # переопределённый остаток для мероприятия
+    custom_price = Column(Integer, nullable=True)   # переопределённая цена
     __table_args__ = (UniqueConstraint('event_id', 'merch_id', name='uq_event_merch'),)
     event = relationship("Event", back_populates="event_merch")
     merchandise = relationship("Merchandise", back_populates="event_links")
+
+
+class SupportTicket(Base):
+    """Тикет поддержки — переписка между студентом и одним модератором."""
+    __tablename__ = 'support_tickets'
+    id = Column(Integer, primary_key=True)
+    student_telegram_id = Column(Integer, nullable=False)
+    moderator_telegram_id = Column(Integer, nullable=True)  # назначенный модератор
+    status = Column(String(20), default='open')   # open / closed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    messages = relationship("SupportMessage", back_populates="ticket")
+
+
+class SupportMessage(Base):
+    __tablename__ = 'support_messages'
+    id = Column(Integer, primary_key=True)
+    ticket_id = Column(Integer, ForeignKey('support_tickets.id'), nullable=False)
+    sender_id = Column(Integer, nullable=False)      # telegram_id отправителя
+    text = Column(Text, nullable=True)
+    file_id = Column(String(255), nullable=True)
+    file_type = Column(String(20), nullable=True)    # photo / document / voice / video
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    ticket = relationship("SupportTicket", back_populates="messages")
 
 
 class Attendance(Base):
