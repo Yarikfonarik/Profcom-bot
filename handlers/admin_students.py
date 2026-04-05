@@ -21,10 +21,8 @@ router = Router()
 async def open_student_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("⛔ Нет прав")
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    try: await callback.message.delete()
+    except Exception: pass
     await callback.message.answer(
         "👥 Панель студентов:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -46,7 +44,6 @@ async def prompt_search(callback: CallbackQuery, state: FSMContext):
 async def search_student(message: Message, state: FSMContext):
     query = " ".join(message.text.strip().split())
     await state.clear()
-
     with Session() as session:
         rows = session.execute(text("""
             SELECT id, full_name, barcode, faculty, balance
@@ -56,47 +53,16 @@ async def search_student(message: Message, state: FSMContext):
         """), {"q": f"%{query}%"}).fetchall()
 
     if not rows:
-        return await message.answer(
-            "❌ Не найдено.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔍 Снова", callback_data="find_student")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="students")],
-            ])
-        )
+        return await message.answer("❌ Не найдено.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Снова", callback_data="find_student")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="students")],
+        ]))
 
     count_txt = f"Найдено: {len(rows)}" + (" (первые 20)" if len(rows) == 20 else "")
-    buttons = [
-        [InlineKeyboardButton(text=f"{r[1]} | {r[2]}", callback_data=f"stucard_{r[0]}")]
-        for r in rows
-    ]
+    buttons = [[InlineKeyboardButton(text=f"{r[1]} | {r[2]}", callback_data=f"stucard_{r[0]}")] for r in rows]
     buttons.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="find_student")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад",       callback_data="students")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="students")])
     await message.answer(f"📋 {count_txt}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-
-async def _generate_qr_for_student(student, bot: Bot, message) -> str | None:
-    """Генерирует QR и кэширует file_id. Возвращает file_id или None."""
-    if student.qr_file_id:
-        return student.qr_file_id
-    try:
-        from qr_generator import generate_qr_bytes
-        qr_bytes = generate_qr_bytes(student.barcode)
-        file = BufferedInputFile(qr_bytes, filename=f"qr_{student.barcode}.png")
-        # Отправляем фото через message и забираем file_id
-        sent = await message.answer_photo(photo=file, caption="⏳")
-        file_id = sent.photo[-1].file_id
-        try:
-            await sent.delete()
-        except Exception:
-            pass
-        with Session() as session:
-            s = session.query(Student).get(student.id)
-            if s:
-                s.qr_file_id = file_id
-                session.commit()
-        return file_id
-    except Exception:
-        return None
 
 
 @router.callback_query(F.data.startswith("stucard_"))
@@ -121,21 +87,30 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
         )
         barcode = s.barcode
         qr_file_id = s.qr_file_id
+        current_role = s.role
+        current_status = s.status
 
     await state.update_data(student_id=student_id)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💰 Баллы",       callback_data=f"sf_{student_id}_balance"),
-            InlineKeyboardButton(text="🔄 Обнулить",    callback_data=f"sreset_{student_id}"),
+            InlineKeyboardButton(text="🔄 Сбросить",    callback_data=f"sreset_{student_id}"),
         ],
         [
             InlineKeyboardButton(text="🏛 Факультет",   callback_data=f"sf_{student_id}_faculty"),
-            InlineKeyboardButton(text="🎓 Роль",        callback_data=f"sf_{student_id}_role"),
-        ],
-        [
-            InlineKeyboardButton(text="🔒 Статус",      callback_data=f"sf_{student_id}_status"),
             InlineKeyboardButton(text="📝 ФИО",         callback_data=f"sf_{student_id}_full_name"),
+        ],
+        # Роль — кнопками
+        [
+            InlineKeyboardButton(text=f"{'✅ ' if current_role == 'student' else ''}🎓 Студент",     callback_data=f"set_role_{student_id}_student"),
+            InlineKeyboardButton(text=f"{'✅ ' if current_role == 'moderator' else ''}🛡 Модератор", callback_data=f"set_role_{student_id}_moderator"),
+            InlineKeyboardButton(text=f"{'✅ ' if current_role == 'admin' else ''}👑 Админ",         callback_data=f"set_role_{student_id}_admin"),
+        ],
+        # Статус — кнопками
+        [
+            InlineKeyboardButton(text=f"{'✅ ' if current_status == 'active' else ''}Активен",       callback_data=f"set_status_{student_id}_active"),
+            InlineKeyboardButton(text=f"{'✅ ' if current_status == 'blocked' else ''}Заблокирован", callback_data=f"set_status_{student_id}_blocked"),
         ],
         [InlineKeyboardButton(text="🔄 Обновить QR",    callback_data=f"admin_refresh_qr_{student_id}")],
         [InlineKeyboardButton(text="💬 Написать",       callback_data=f"smsg_{student_id}")],
@@ -145,12 +120,9 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
         ],
     ])
 
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    try: await callback.message.delete()
+    except Exception: pass
 
-    # Показываем карточку с QR
     if qr_file_id:
         try:
             await callback.message.answer_photo(photo=qr_file_id, caption=caption, reply_markup=kb)
@@ -161,20 +133,18 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
                 if st:
                     st.qr_file_id = None
                     session.commit()
-            qr_file_id = None
 
-    # Генерируем QR
     if barcode:
         try:
             from qr_generator import generate_qr_bytes
+            from aiogram.types import BufferedInputFile
             qr_bytes = generate_qr_bytes(barcode)
             file = BufferedInputFile(qr_bytes, filename=f"qr_{barcode}.png")
             msg = await callback.message.answer_photo(photo=file, caption=caption, reply_markup=kb)
-            new_file_id = msg.photo[-1].file_id
             with Session() as session:
                 st = session.query(Student).get(student_id)
                 if st:
-                    st.qr_file_id = new_file_id
+                    st.qr_file_id = msg.photo[-1].file_id
                     session.commit()
             return
         except Exception:
@@ -183,53 +153,113 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
     await callback.message.answer(caption, reply_markup=kb)
 
 
-# ── Обновить QR (только через карточку студента в админ панели) ──────────────
-@router.callback_query(F.data.startswith("admin_refresh_qr_"))
-async def admin_refresh_qr(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    if callback.from_user.id not in ADMIN_IDS:
-        return await callback.answer("⛔ Нет прав", show_alert=True)
-    student_id = int(callback.data.split("_")[3])
+# ── Смена роли кнопками с подтверждением ─────────────────────────────────────
+@router.callback_query(F.data.startswith("set_role_"))
+async def confirm_role(callback: CallbackQuery):
+    _, _, student_id, new_role = callback.data.split("_", 3)
+    student_id = int(student_id)
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if not s: return await callback.answer("Не найден")
+        current = s.role
+        name = s.full_name
+
+    role_names = {"student": "🎓 Студент", "moderator": "🛡 Модератор", "admin": "👑 Админ"}
+    if current == new_role:
+        return await callback.answer("Роль уже такая", show_alert=True)
+
+    await callback.message.answer(
+        f"*{name}*\nСейчас: {role_names.get(current)}\nСменить на: {role_names.get(new_role)}?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да", callback_data=f"do_role_{student_id}_{new_role}"),
+            InlineKeyboardButton(text="❌ Нет", callback_data=f"stucard_{student_id}"),
+        ]])
+    )
+
+
+@router.callback_query(F.data.startswith("do_role_"))
+async def do_change_role(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    _, _, student_id, new_role = callback.data.split("_", 3)
+    student_id = int(student_id)
     with Session() as session:
         s = session.query(Student).get(student_id)
         if s:
-            s.qr_file_id = None
+            s.role = new_role
             session.commit()
-    await callback.answer("🔄 QR сброшен, открываю заново...")
+    await callback.answer(f"✅ Роль изменена")
+    try: await callback.message.delete()
+    except Exception: pass
     callback.data = f"stucard_{student_id}"
     await show_student_card(callback, state, bot)
 
 
-# ── Обнуление баллов студента ────────────────────────────────────────────────
-@router.callback_query(F.data.startswith("sreset_"))
-async def reset_one_balance(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    student_id = int(callback.data.split("_")[1])
+# ── Смена статуса кнопками с подтверждением ──────────────────────────────────
+@router.callback_query(F.data.startswith("set_status_"))
+async def confirm_status(callback: CallbackQuery):
+    _, _, student_id, new_status = callback.data.split("_", 3)
+    student_id = int(student_id)
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if not s: return await callback.answer("Не найден")
+        current = s.status
+        name = s.full_name
+
+    if current == new_status:
+        return await callback.answer("Статус уже такой", show_alert=True)
+
+    status_names = {"active": "✅ Активен", "blocked": "⛔ Заблокирован"}
+    await callback.message.answer(
+        f"*{name}*\nСейчас: {status_names.get(current)}\nСменить на: {status_names.get(new_status)}?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да", callback_data=f"do_status_{student_id}_{new_status}"),
+            InlineKeyboardButton(text="❌ Нет", callback_data=f"stucard_{student_id}"),
+        ]])
+    )
+
+
+@router.callback_query(F.data.startswith("do_status_"))
+async def do_change_status(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    _, _, student_id, new_status = callback.data.split("_", 3)
+    student_id = int(student_id)
     with Session() as session:
         s = session.query(Student).get(student_id)
         if s:
-            s.balance = 0
+            s.status = new_status
             session.commit()
-    await callback.answer("✅ Баллы обнулены")
+    await callback.answer("✅ Статус изменён")
+    try: await callback.message.delete()
+    except Exception: pass
     callback.data = f"stucard_{student_id}"
     await show_student_card(callback, state, bot)
 
 
-# ── Редактирование поля ──────────────────────────────────────────────────────
+# ── Редактирование текстовых полей ────────────────────────────────────────────
 @router.callback_query(F.data.startswith("sf_"))
 async def quick_edit_field(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_", 2)
     student_id = int(parts[1])
     field = parts[2]
 
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        current = getattr(s, field, "—") if s else "—"
+
     prompts = {
-        "balance":   "💰 Введите баллы (500, +100, -50):",
-        "faculty":   "🏛 Введите факультет:",
-        "role":      "🎓 Роль: student / moderator / admin",
-        "status":    "🔒 Статус: active / blocked",
-        "full_name": "📝 Введите ФИО:",
+        "balance":   f"💰 Сейчас: {current}\nВведите новые баллы (500, +100, -50):",
+        "faculty":   f"🏛 Сейчас: {current}\nВведите факультет:",
+        "full_name": f"📝 Сейчас: {current}\nВведите ФИО:",
     }
+
     await state.update_data(student_id=student_id, field=field)
     await state.set_state(StudentEditState.AWAITING_VALUE)
-    await callback.message.answer(prompts.get(field, "Введите значение:"))
+    await callback.message.answer(
+        prompts.get(field, "Введите значение:"),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"stucard_{student_id}")]
+        ])
+    )
 
 
 @router.message(StudentEditState.AWAITING_VALUE)
@@ -247,22 +277,11 @@ async def save_student_field(message: Message, state: FSMContext, bot: Bot):
 
         if field == "balance":
             try:
-                if value.startswith("+"):
-                    s.balance += int(value[1:])
-                elif value.startswith("-"):
-                    s.balance -= int(value[1:])
-                else:
-                    s.balance = int(value)
+                if value.startswith("+"):   s.balance += int(value[1:])
+                elif value.startswith("-"): s.balance -= int(value[1:])
+                else:                       s.balance = int(value)
             except ValueError:
                 return await message.answer("❗ Введите число")
-        elif field == "status":
-            if value not in ("active", "blocked"):
-                return await message.answer("❗ active или blocked")
-            s.status = value
-        elif field == "role":
-            if value not in ("student", "moderator", "admin"):
-                return await message.answer("❗ student / moderator / admin")
-            s.role = value
         else:
             setattr(s, field, value)
         session.commit()
@@ -283,7 +302,55 @@ async def save_student_field(message: Message, state: FSMContext, bot: Bot):
     await show_student_card(FakeCb(), state, bot)
 
 
-# ── Написать студенту ────────────────────────────────────────────────────────
+# ── Сбросить баллы одного студента ───────────────────────────────────────────
+@router.callback_query(F.data.startswith("sreset_"))
+async def reset_one_balance(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    student_id = int(callback.data.split("_")[1])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if s: name = s.full_name
+    await callback.message.answer(
+        f"⚠️ Сбросить баллы *{name}*?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да", callback_data=f"do_sreset_{student_id}"),
+            InlineKeyboardButton(text="❌ Нет", callback_data=f"stucard_{student_id}"),
+        ]])
+    )
+
+
+@router.callback_query(F.data.startswith("do_sreset_"))
+async def do_reset_one(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    student_id = int(callback.data.split("_")[2])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if s:
+            s.balance = 0
+            session.commit()
+    await callback.answer("✅ Баллы сброшены")
+    try: await callback.message.delete()
+    except Exception: pass
+    callback.data = f"stucard_{student_id}"
+    await show_student_card(callback, state, bot)
+
+
+# ── Обновить QR ───────────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("admin_refresh_qr_"))
+async def admin_refresh_qr(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⛔ Нет прав", show_alert=True)
+    student_id = int(callback.data.split("_")[3])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if s:
+            s.qr_file_id = None
+            session.commit()
+    await callback.answer("🔄 QR сброшен")
+    callback.data = f"stucard_{student_id}"
+    await show_student_card(callback, state, bot)
+
+
+# ── Написать студенту ─────────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("smsg_"))
 async def msg_student_prompt(callback: CallbackQuery, state: FSMContext):
     student_id = int(callback.data.split("_")[1])
@@ -302,7 +369,6 @@ async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     student_id = data.get("msg_student_id")
     await state.clear()
-
     with Session() as session:
         s = session.query(Student).get(student_id)
         if not s or not s.telegram_id:
@@ -312,24 +378,27 @@ async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
 
     mod_name = message.from_user.full_name or "Администрация"
     header = f"📩 *Сообщение от администрации ({mod_name}):*\n\n"
+    from models import SupportTicket
+    with Session() as session:
+        ticket = session.query(SupportTicket).filter_by(student_telegram_id=target_id, status='open').first()
+        ticket_id = ticket.id if ticket else None
+
     reply_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Ответить", callback_data="support")]
+        [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"student_reply_{ticket_id}" if ticket_id else "support")]
     ])
+
     try:
         if message.text:
             await bot.send_message(target_id, header + message.text, parse_mode="Markdown", reply_markup=reply_kb)
         elif message.photo:
             await bot.send_photo(target_id, message.photo[-1].file_id,
                 caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=reply_kb)
-        elif message.document:
-            await bot.send_document(target_id, message.document.file_id,
-                caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=reply_kb)
         await message.answer(f"✅ Отправлено {student_name}!")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
 
-# ── Импорт из Excel ──────────────────────────────────────────────────────────
+# ── Импорт из Excel ───────────────────────────────────────────────────────────
 @router.callback_query(F.data == "import_students")
 async def import_students_prompt(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
@@ -340,42 +409,33 @@ async def import_students_prompt(callback: CallbackQuery, state: FSMContext):
 
 @router.message(ImportState.AWAITING_FILE, F.document)
 async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
-    if message.from_user.id not in ADMIN_IDS:
-        return
+    if message.from_user.id not in ADMIN_IDS: return
     if not message.document.file_name.endswith(".xlsx"):
         return await message.answer("❗ Только .xlsx")
     await message.answer("⏳ Обрабатываю...")
     try:
         file = await bot.get_file(message.document.file_id)
-        file_bytes = await bot.download_file(file.file_path)
-        df = pd.read_excel(io.BytesIO(file_bytes.read()), dtype=str)
+        fb = await bot.download_file(file.file_path)
+        df = pd.read_excel(io.BytesIO(fb.read()), dtype=str)
         df.columns = df.columns.str.strip()
         added = updated = errors = 0
         with Session() as session:
             for _, row in df.iterrows():
                 try:
                     barcode = str(row.get("barcode", "") or "").strip()
-                    if not barcode or barcode == "nan":
-                        continue
+                    if not barcode or barcode == "nan": continue
                     parts = [str(row.get(c, "") or "").strip() for c in ("Фамилия", "Имя", "Отчество")]
                     full_name = " ".join(p for p in parts if p and p != "nan")
                     faculty = str(row.get("Факультет/Институт", "") or "").strip()
-                    if faculty == "nan":
-                        faculty = ""
+                    if faculty == "nan": faculty = ""
                     status = str(row.get("Статус", "active") or "active").strip()
-                    if status not in ("active", "blocked"):
-                        status = "active"
+                    if status not in ("active", "blocked"): status = "active"
                     existing = session.query(Student).filter_by(barcode=barcode).first()
                     if existing:
-                        existing.full_name = full_name
-                        existing.faculty = faculty
-                        existing.status = status
-                        updated += 1
+                        existing.full_name = full_name; existing.faculty = faculty; existing.status = status; updated += 1
                     else:
-                        session.add(Student(full_name=full_name, barcode=barcode, faculty=faculty, status=status))
-                        added += 1
-                except Exception:
-                    errors += 1
+                        session.add(Student(full_name=full_name, barcode=barcode, faculty=faculty, status=status)); added += 1
+                except Exception: errors += 1
             session.commit()
         await state.clear()
         await message.answer(f"✅ Готово!\n➕ {added} | 🔄 {updated} | ❌ {errors}")
