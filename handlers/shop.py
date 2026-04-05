@@ -50,6 +50,7 @@ def _build_shop_kb(items, bought_ids: set, page: int, total: int, is_admin: bool
     buttons.append([InlineKeyboardButton(text="🧾 Мои покупки", callback_data="my_purchases")])
     if is_admin:
         buttons.append([InlineKeyboardButton(text="⚙️ Управление товарами", callback_data="manage_items")])
+        buttons.append([InlineKeyboardButton(text="🛍 Статистика магазина",  callback_data="shop_stats_menu")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
