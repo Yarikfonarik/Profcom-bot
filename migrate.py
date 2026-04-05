@@ -9,9 +9,21 @@ migrations = [
     "ALTER TABLE merchandise ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(255);",
     "ALTER TABLE merchandise ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;",
     "ALTER TABLE students ADD COLUMN IF NOT EXISTS qr_file_id VARCHAR(255);",
+    "ALTER TABLE task_verifications ADD COLUMN IF NOT EXISTS proof_type VARCHAR(20) DEFAULT 'photo';",
+    # Events
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS hidden BOOLEAN DEFAULT FALSE;",
-
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS description TEXT;",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS image_file_id VARCHAR(255);",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS event_date VARCHAR(100);",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS how_to_join TEXT;",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS has_tasks BOOLEAN DEFAULT TRUE;",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS has_lectures BOOLEAN DEFAULT TRUE;",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS has_shop BOOLEAN DEFAULT TRUE;",
+    # Event merch custom fields
+    "ALTER TABLE event_merch ADD COLUMN IF NOT EXISTS custom_stock INTEGER;",
+    "ALTER TABLE event_merch ADD COLUMN IF NOT EXISTS custom_price INTEGER;",
+    # New tables
     """CREATE TABLE IF NOT EXISTS event_participants (
         id SERIAL PRIMARY KEY,
         event_id INTEGER REFERENCES events(id),
@@ -44,7 +56,25 @@ migrations = [
         id SERIAL PRIMARY KEY,
         event_id INTEGER REFERENCES events(id),
         merch_id INTEGER REFERENCES merchandise(id),
+        custom_stock INTEGER,
+        custom_price INTEGER,
         UNIQUE(event_id, merch_id)
+    );""",
+    """CREATE TABLE IF NOT EXISTS support_tickets (
+        id SERIAL PRIMARY KEY,
+        student_telegram_id INTEGER NOT NULL,
+        moderator_telegram_id INTEGER,
+        status VARCHAR(20) DEFAULT 'open',
+        created_at TIMESTAMP DEFAULT NOW()
+    );""",
+    """CREATE TABLE IF NOT EXISTS support_messages (
+        id SERIAL PRIMARY KEY,
+        ticket_id INTEGER REFERENCES support_tickets(id),
+        sender_id INTEGER NOT NULL,
+        text TEXT,
+        file_id VARCHAR(255),
+        file_type VARCHAR(20),
+        sent_at TIMESTAMP DEFAULT NOW()
     );""",
 ]
 
