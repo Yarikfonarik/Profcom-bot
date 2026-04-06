@@ -1,4 +1,4 @@
-# handlers/support.py
+# handlers/support.py — чат-система с тикетами
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -10,9 +10,12 @@ from states import SupportState
 
 router = Router()
 
+# Активные чат-сессии: {user_id: ticket_id}
+# Если пользователь в чате — сообщения идут напрямую в тикет без state
+_active_chat: dict[int, int] = {}
+
 
 def _get_mods(session) -> list[tuple[int, str]]:
-    """Возвращает список (telegram_id, имя) модераторов."""
     mods = session.query(Student).filter(
         Student.role.in_(["admin", "moderator"]),
         Student.telegram_id != None
@@ -20,228 +23,228 @@ def _get_mods(session) -> list[tuple[int, str]]:
     result = [(m.telegram_id, m.full_name) for m in mods]
     for a in ADMIN_IDS:
         if not any(r[0] == a for r in result):
-            result.append((a, f"Администратор ({a})"))
+            result.append((a, f"Администратор"))
     return result
 
 
-def _student_reply_kb(ticket_id: int) -> InlineKeyboardMarkup:
+def _chat_kb(ticket_id: int, is_mod: bool = False, event_id: int = None) -> InlineKeyboardMarkup:
+    rows = []
+    if is_mod:
+        rows.append([InlineKeyboardButton(text="🔄 Передать", callback_data=f"transfer_choose_{ticket_id}")])
+        rows.append([InlineKeyboardButton(text="✅ Закрыть тикет", callback_data=f"close_ticket_{ticket_id}")])
+    rows.append([InlineKeyboardButton(text="🚪 Выйти из чата", callback_data=f"exit_chat_{ticket_id}")])
+    if event_id:
+        rows.append([InlineKeyboardButton(text="🎪 К мероприятию", callback_data=f"event_{event_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _enter_chat_kb(ticket_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"student_reply_{ticket_id}")]
+        [InlineKeyboardButton(text="💬 Войти в чат", callback_data=f"enter_chat_{ticket_id}")]
     ])
 
 
-def _mod_kb(ticket_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Ответить",               callback_data=f"reply_ticket_{ticket_id}")],
-        [InlineKeyboardButton(text="🔄 Передать модератору",    callback_data=f"transfer_choose_{ticket_id}")],
-        [InlineKeyboardButton(text="✅ Закрыть тикет",          callback_data=f"close_ticket_{ticket_id}")],
-    ])
+async def _send_to_chat(message: Message, ticket_id: int, sender_id: int, bot: Bot,
+                         text_content: str = None, file_id: str = None, file_type: str = None):
+    """Сохраняет и доставляет сообщение в чате тикета."""
+    with Session() as session:
+        ticket = session.query(SupportTicket).get(ticket_id)
+        if not ticket: return
+
+        session.add(SupportMessage(
+            ticket_id=ticket_id, sender_id=sender_id,
+            text=text_content, file_id=file_id, file_type=file_type
+        ))
+        session.commit()
+
+        student_tg = ticket.student_telegram_id
+        mod_tg = ticket.moderator_telegram_id
+        event_id = ticket.event_id if hasattr(ticket, 'event_id') else None
+
+        student_obj = session.query(Student).filter_by(telegram_id=student_tg).first()
+        student_name = student_obj.full_name if student_obj else f"ID:{student_tg}"
+        mod_obj = session.query(Student).filter_by(telegram_id=mod_tg).first() if mod_tg else None
+        mod_name = mod_obj.full_name if mod_obj else "Модератор"
+
+    is_mod_sender = sender_id != student_tg
+    sender_name = mod_name if is_mod_sender else student_name
+
+    # Кому отправлять
+    targets_student = [student_tg]
+    with Session() as session:
+        mods = _get_mods(session)
+    mod_ids = [mod_tg] if mod_tg else [m[0] for m in mods]
+
+    # Формируем сообщение
+    header = f"{'🛡 ' + sender_name if is_mod_sender else '👤 ' + sender_name}:\n"
+
+    async def _send_msg(target_id: int, is_target_mod: bool):
+        if target_id == sender_id: return
+        in_chat = _active_chat.get(target_id) == ticket_id
+        kb = _chat_kb(ticket_id, is_mod=is_target_mod) if in_chat else _enter_chat_kb(ticket_id)
+        notif_header = header if in_chat else f"🔔 Новое сообщение в тикете #{ticket_id} от {sender_name}:\nВойди в чат чтобы ответить."
+        content = (text_content or "") if in_chat else ""
+
+        try:
+            if in_chat and file_id:
+                if file_type == 'photo':
+                    await bot.send_photo(target_id, file_id, caption=header + (text_content or ""), reply_markup=kb)
+                elif file_type == 'video':
+                    await bot.send_video(target_id, file_id, caption=header, reply_markup=kb)
+                elif file_type == 'document':
+                    await bot.send_document(target_id, file_id, caption=header, reply_markup=kb)
+                elif file_type == 'voice':
+                    await bot.send_voice(target_id, file_id, caption=header, reply_markup=kb)
+            else:
+                msg_text = (header + content) if in_chat else notif_header
+                if msg_text:
+                    await bot.send_message(target_id, msg_text, reply_markup=kb)
+        except Exception:
+            pass
+
+    for mid in mod_ids:
+        await _send_msg(mid, is_target_mod=True)
+    for sid in targets_student:
+        await _send_msg(sid, is_target_mod=False)
 
 
-async def support_start_msg(message: Message, state: FSMContext):
-    """Запуск поддержки из команды /help."""
+# ── Вход в чат ────────────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("enter_chat_"))
+async def enter_chat(callback: CallbackQuery, state: FSMContext):
+    ticket_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    with Session() as session:
+        ticket = session.query(SupportTicket).get(ticket_id)
+        if not ticket: return await callback.answer("Тикет не найден")
+        # Назначаем модератора если заходит модератор
+        if user_id in ADMIN_IDS and not ticket.moderator_telegram_id:
+            ticket.moderator_telegram_id = user_id
+            session.commit()
+
+        messages = session.query(SupportMessage).filter_by(ticket_id=ticket_id).order_by(SupportMessage.sent_at).all()
+        student_tg = ticket.student_telegram_id
+        event_id = getattr(ticket, 'event_id', None)
+
+        history = []
+        for sm in messages:
+            is_mod = sm.sender_id != student_tg
+            role = "🛡" if is_mod else "👤"
+            student_obj = session.query(Student).filter_by(telegram_id=sm.sender_id).first()
+            name = student_obj.full_name if student_obj else f"ID:{sm.sender_id}"
+            ts = sm.sent_at.strftime("%H:%M")
+            content = sm.text or f"[{sm.file_type}]"
+            history.append(f"[{ts}] {role} {name}: {content}")
+
+    _active_chat[user_id] = ticket_id
     await state.clear()
-    user_id = message.from_user.id
+
+    is_mod = user_id in ADMIN_IDS
+    history_text = "\n".join(history[-20:]) if history else "(история пуста)"
+
+    await callback.message.answer(
+        f"💬 *Чат тикет #{ticket_id}*\n\n{history_text}\n\n_Напишите сообщение — оно сразу уйдёт в чат._",
+        parse_mode="Markdown",
+        reply_markup=_chat_kb(ticket_id, is_mod=is_mod, event_id=event_id)
+    )
+
+
+@router.callback_query(F.data.startswith("exit_chat_"))
+async def exit_chat(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    _active_chat.pop(user_id, None)
+    await callback.message.answer("🚪 Вышел из чата. Придёт уведомление если напишут.")
+    try: await callback.message.delete()
+    except Exception: pass
+
+
+# ── Начало поддержки ─────────────────────────────────────────────────────────
+async def _open_support(message: Message, state: FSMContext, user_id: int, event_id: int = None):
+    await state.clear()
     with Session() as session:
         ticket = session.query(SupportTicket).filter_by(student_telegram_id=user_id, status='open').first()
-        ticket_id = ticket.id if ticket else None
-    if ticket_id:
-        await state.update_data(ticket_id=ticket_id)
-    await state.set_state(SupportState.AWAITING_MESSAGE)
+        if not ticket:
+            ticket = SupportTicket(student_telegram_id=user_id)
+            if event_id:
+                ticket.event_id = event_id
+            session.add(ticket)
+            session.commit()
+        ticket_id = ticket.id
+
+    _active_chat[user_id] = ticket_id
+    await state.clear()
+
+    event_note = f"\n🎪 _Обращение с мероприятия #{event_id}_" if event_id else ""
     await message.answer(
-        "🆘 *Поддержка*\n\nНапиши сообщение — текст, фото, документ, голосовое или видео.",
+        f"💬 *Чат поддержки* #{ticket_id}{event_note}\n\nПишите сообщение — оно сразу уйдёт модератору.\nДля выхода нажмите кнопку ниже.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_back")]
-        ])
+        reply_markup=_chat_kb(ticket_id, is_mod=False)
     )
 
 
 @router.callback_query(F.data == "support")
 async def support_start(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    user_id = callback.from_user.id
-    with Session() as session:
-        ticket = session.query(SupportTicket).filter_by(student_telegram_id=user_id, status='open').first()
-        ticket_id = ticket.id if ticket else None
-    if ticket_id:
-        await state.update_data(ticket_id=ticket_id)
-    await state.set_state(SupportState.AWAITING_MESSAGE)
-    await callback.message.answer(
-        "🆘 *Поддержка*\n\nНапиши сообщение — текст, фото, документ, голосовое или видео.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu_back")]
-        ])
-    )
+    await _open_support(callback.message, state, callback.from_user.id)
 
 
 @router.callback_query(F.data == "support_unreg")
 async def support_unreg(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await state.set_state(SupportState.AWAITING_MESSAGE)
-    await callback.message.answer(
-        "🆘 *Поддержка*\n\nНапиши сообщение.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_support")]
-        ])
-    )
+    await _open_support(callback.message, state, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("support_event_"))
+async def support_event(callback: CallbackQuery, state: FSMContext):
+    event_id = int(callback.data.split("_")[2])
+    await _open_support(callback.message, state, callback.from_user.id, event_id=event_id)
 
 
 @router.callback_query(F.data == "cancel_support")
 async def cancel_support(callback: CallbackQuery, state: FSMContext):
     await state.clear()
+    _active_chat.pop(callback.from_user.id, None)
     await callback.message.answer("Отменено.")
 
 
-@router.message(SupportState.AWAITING_MESSAGE)
-async def receive_support_message(message: Message, state: FSMContext, bot: Bot):
+# ── Перехват всех сообщений для активных чатов ───────────────────────────────
+# ВАЖНО: этот хендлер должен быть ПОСЛЕДНИМ в файле и использует низкий приоритет
+
+@router.message(F.text | F.photo | F.document | F.voice | F.video)
+async def handle_chat_message(message: Message, state: FSMContext, bot: Bot):
     user_id = message.from_user.id
-    data = await state.get_data()
-    await state.clear()
+    ticket_id = _active_chat.get(user_id)
+    if not ticket_id:
+        return  # Не в чате — пропускаем
 
-    with Session() as session:
-        student = session.query(Student).filter_by(telegram_id=user_id).first()
+    # В чате — отправляем сообщение
+    file_id, file_type = None, None
+    if message.photo:     file_id = message.photo[-1].file_id; file_type = 'photo'
+    elif message.document: file_id = message.document.file_id; file_type = 'document'
+    elif message.voice:    file_id = message.voice.file_id;    file_type = 'voice'
+    elif message.video:    file_id = message.video.file_id;    file_type = 'video'
 
-        ticket = None
-        if data.get("ticket_id"):
-            ticket = session.query(SupportTicket).get(data["ticket_id"])
-        if not ticket:
-            ticket = session.query(SupportTicket).filter_by(student_telegram_id=user_id, status='open').first()
-        if not ticket:
-            ticket = SupportTicket(student_telegram_id=user_id)
-            session.add(ticket)
-            session.flush()
-
-        file_id, file_type = None, None
-        if message.photo:     file_id = message.photo[-1].file_id; file_type = 'photo'
-        elif message.document: file_id = message.document.file_id; file_type = 'document'
-        elif message.voice:    file_id = message.voice.file_id;    file_type = 'voice'
-        elif message.video:    file_id = message.video.file_id;    file_type = 'video'
-
-        session.add(SupportMessage(
-            ticket_id=ticket.id, sender_id=user_id,
-            text=message.text or message.caption, file_id=file_id, file_type=file_type
-        ))
-        session.commit()
-
-        ticket_id = ticket.id
-        mod_id = ticket.moderator_telegram_id
-        mods = _get_mods(session)
-
-        if student:
-            sender_info = f"👤 {student.full_name} | {student.barcode} | ID: {user_id}"
-        else:
-            sender_info = f"👤 {message.from_user.full_name or 'Неизв.'} | ID: {user_id}"
-
-    header = f"📨 *Обращение #{ticket_id}*\n{sender_info}\n\n"
-    targets = [mod_id] if mod_id else [m[0] for m in mods]
-    kb = _mod_kb(ticket_id)
-
-    for target in targets:
-        try:
-            if message.text:
-                await bot.send_message(target, header + message.text, parse_mode="Markdown", reply_markup=kb)
-            elif message.photo:
-                await bot.send_photo(target, message.photo[-1].file_id,
-                    caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=kb)
-            elif message.document:
-                await bot.send_document(target, message.document.file_id,
-                    caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=kb)
-            elif message.voice:
-                await bot.send_voice(target, message.voice.file_id, caption=header, parse_mode="Markdown", reply_markup=kb)
-            elif message.video:
-                await bot.send_video(target, message.video.file_id,
-                    caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=kb)
-        except Exception:
-            pass
-
-    await message.answer(
-        "✅ Сообщение отправлено! Ожидай ответа.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")]
-        ])
+    await _send_to_chat(
+        message, ticket_id, user_id, bot,
+        text_content=message.text or message.caption,
+        file_id=file_id, file_type=file_type
     )
 
 
-# ── Ответ модератора ─────────────────────────────────────────────────────────
+# ── Ответ из уведомления ──────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("reply_ticket_"))
-async def reply_to_ticket(callback: CallbackQuery, state: FSMContext):
+async def reply_to_ticket(callback: CallbackQuery):
     ticket_id = int(callback.data.split("_")[2])
-    await state.update_data(reply_ticket_id=ticket_id, reply_mod_id=callback.from_user.id)
-    await state.set_state(SupportState.AWAITING_REPLY)
-    await callback.message.answer(
-        f"✏️ Ответ на тикет #{ticket_id}:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_reply")]
-        ])
-    )
+    callback.data = f"enter_chat_{ticket_id}"
+    await enter_chat(callback, FSMContext.__new__(FSMContext))
 
 
-@router.callback_query(F.data == "cancel_reply")
-async def cancel_reply(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.answer("Отменено.")
-
-
-@router.message(SupportState.AWAITING_REPLY)
-async def send_mod_reply(message: Message, state: FSMContext, bot: Bot):
-    data = await state.get_data()
-    ticket_id = data.get("reply_ticket_id")
-    mod_id = data.get("reply_mod_id")
-    await state.clear()
-
-    with Session() as session:
-        ticket = session.query(SupportTicket).get(ticket_id)
-        if not ticket: return await message.answer("❌ Тикет не найден.")
-        if not ticket.moderator_telegram_id:
-            ticket.moderator_telegram_id = mod_id
-
-        file_id, file_type = None, None
-        if message.photo:     file_id = message.photo[-1].file_id; file_type = 'photo'
-        elif message.document: file_id = message.document.file_id; file_type = 'document'
-        elif message.voice:    file_id = message.voice.file_id;    file_type = 'voice'
-        elif message.video:    file_id = message.video.file_id;    file_type = 'video'
-
-        session.add(SupportMessage(ticket_id=ticket_id, sender_id=mod_id,
-            text=message.text or message.caption, file_id=file_id, file_type=file_type))
-        session.commit()
-        student_tg = ticket.student_telegram_id
-
-    mod_name = message.from_user.full_name or "Модератор"
-    header = f"📩 *Ответ от модератора ({mod_name}):*\n\n"
-    kb = _student_reply_kb(ticket_id)
-
-    try:
-        if message.text:
-            await bot.send_message(student_tg, header + message.text, parse_mode="Markdown", reply_markup=kb)
-        elif message.photo:
-            await bot.send_photo(student_tg, message.photo[-1].file_id,
-                caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=kb)
-        elif message.document:
-            await bot.send_document(student_tg, message.document.file_id,
-                caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=kb)
-        elif message.voice:
-            await bot.send_voice(student_tg, message.voice.file_id, caption=header, parse_mode="Markdown", reply_markup=kb)
-        elif message.video:
-            await bot.send_video(student_tg, message.video.file_id,
-                caption=header + (message.caption or ""), parse_mode="Markdown", reply_markup=kb)
-        await message.answer("✅ Ответ отправлен!")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-
-# ── Студент отвечает ──────────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("student_reply_"))
 async def student_reply_start(callback: CallbackQuery, state: FSMContext):
     ticket_id = int(callback.data.split("_")[2])
-    await state.update_data(ticket_id=ticket_id)
-    await state.set_state(SupportState.AWAITING_MESSAGE)
-    await callback.message.answer("✏️ Введи ответ модератору:")
+    callback.data = f"enter_chat_{ticket_id}"
+    await enter_chat(callback, state)
 
 
-# ── Передать тикет — выбор модератора ────────────────────────────────────────
+# ── Передача тикета ──────────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("transfer_choose_"))
 async def transfer_choose(callback: CallbackQuery):
     ticket_id = int(callback.data.split("_")[2])
@@ -250,7 +253,6 @@ async def transfer_choose(callback: CallbackQuery):
     with Session() as session:
         mods = _get_mods(session)
 
-    # Кнопки с именами модераторов (кроме текущего)
     buttons = []
     for mod_tg_id, mod_name in mods:
         if mod_tg_id != sender_id:
@@ -258,13 +260,13 @@ async def transfer_choose(callback: CallbackQuery):
                 text=f"👤 {mod_name}",
                 callback_data=f"do_transfer_{ticket_id}_{mod_tg_id}"
             )])
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_reply")])
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data=f"enter_chat_{ticket_id}")])
 
     if not buttons[:-1]:
         return await callback.answer("Нет других модераторов", show_alert=True)
 
     await callback.message.answer(
-        "Выберите модератора для передачи тикета:",
+        "Выберите модератора:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
@@ -272,109 +274,87 @@ async def transfer_choose(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("do_transfer_"))
 async def do_transfer_ticket(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
-    ticket_id = int(parts[2])
-    new_mod_id = int(parts[3])
+    ticket_id, new_mod_id = int(parts[2]), int(parts[3])
     sender_id = callback.from_user.id
 
     with Session() as session:
         ticket = session.query(SupportTicket).get(ticket_id)
         if not ticket: return await callback.answer("Тикет не найден")
-
         messages = session.query(SupportMessage).filter_by(ticket_id=ticket_id).order_by(SupportMessage.sent_at).all()
-        history_lines = []
-        for sm in messages:
-            role = "Студент" if sm.sender_id == ticket.student_telegram_id else "Модератор"
-            ts = sm.sent_at.strftime("%H:%M")
-            text = sm.text or f"[{sm.file_type}]"
-            history_lines.append(f"[{ts}] {role}: {text}")
-
+        student_tg = ticket.student_telegram_id
+        history = "\n".join(
+            f"[{sm.sent_at.strftime('%H:%M')}] {'Мод' if sm.sender_id != student_tg else 'Студент'}: {sm.text or f'[{sm.file_type}]'}"
+            for sm in messages
+        )
         ticket.moderator_telegram_id = new_mod_id
         session.commit()
-        student_tg = ticket.student_telegram_id
 
-    history_text = "\n".join(history_lines) if history_lines else "(история пуста)"
-    kb = _mod_kb(ticket_id)
-    header = (
-        f"🔄 *Тикет #{ticket_id} передан вам*\n\n"
-        f"*История:*\n{history_text}\n\n"
-        f"Ответьте студенту:"
-    )
+    _active_chat.pop(sender_id, None)
     try:
-        await bot.send_message(new_mod_id, header, parse_mode="Markdown", reply_markup=kb)
-    except Exception:
-        pass
+        await bot.send_message(
+            new_mod_id,
+            f"🔄 *Тикет #{ticket_id} передан вам*\n\n*История:*\n{history or '(пусто)'}",
+            parse_mode="Markdown",
+            reply_markup=_enter_chat_kb(ticket_id)
+        )
+    except Exception: pass
 
     await callback.answer("✅ Тикет передан", show_alert=True)
     try: await callback.message.delete()
     except Exception: pass
 
 
-# ── Закрыть тикет ────────────────────────────────────────────────────────────
+# ── Закрытие тикета ────────────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("close_ticket_"))
-async def close_ticket(callback: CallbackQuery):
+async def close_ticket(callback: CallbackQuery, bot: Bot):
     ticket_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
     with Session() as session:
         ticket = session.query(SupportTicket).get(ticket_id)
         if ticket:
             ticket.status = 'closed'
             session.commit()
+            student_tg = ticket.student_telegram_id
+
+    _active_chat.pop(user_id, None)
+    try:
+        await bot.send_message(student_tg, f"✅ Тикет #{ticket_id} закрыт модератором.")
+    except Exception: pass
+
     await callback.answer("✅ Тикет закрыт")
     try: await callback.message.delete()
     except Exception: pass
 
 
-# ── Панель обращений (модератор) ──────────────────────────────────────────────
+# ── Панель обращений (админ) ──────────────────────────────────────────────────
 @router.callback_query(F.data == "support_admin")
 async def support_admin(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return await callback.answer("⛔ Нет прав", show_alert=True)
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
 
     with Session() as session:
         open_tickets = session.query(SupportTicket).filter_by(status='open').order_by(SupportTicket.created_at.desc()).all()
         closed_count = session.query(SupportTicket).filter_by(status='closed').count()
 
-        unanswered = []
-        assigned = []
+        unanswered, answered = [], []
         for t in open_tickets:
-            # Проверяем есть ли ответ модератора
-            has_mod_reply = session.query(SupportMessage).filter(
+            has_reply = session.query(SupportMessage).filter(
                 SupportMessage.ticket_id == t.id,
                 SupportMessage.sender_id != t.student_telegram_id
             ).first() is not None
-
             student = session.query(Student).filter_by(telegram_id=t.student_telegram_id).first()
-            student_name = student.full_name if student else f"ID: {t.student_telegram_id}"
-            mod_name = None
-            if t.moderator_telegram_id:
-                mod = session.query(Student).filter_by(telegram_id=t.moderator_telegram_id).first()
-                mod_name = mod.full_name if mod else f"ID: {t.moderator_telegram_id}"
+            name = student.full_name if student else f"ID:{t.student_telegram_id}"
+            event_note = f" [🎪]" if getattr(t, 'event_id', None) else ""
+            info = (t.id, name + event_note, has_reply)
+            (answered if has_reply else unanswered).append(info)
 
-            info = (t.id, student_name, mod_name, has_mod_reply)
-            if has_mod_reply:
-                assigned.append(info)
-            else:
-                unanswered.append(info)
-
-    msg = f"🆘 *Обращения в поддержку*\n\n"
-    msg += f"🔴 Без ответа: {len(unanswered)}\n"
-    msg += f"🟢 С ответом: {len(assigned)}\n"
-    msg += f"✅ Закрыто: {closed_count}\n\n"
-
+    msg = f"🆘 *Обращения*\n\n❗ Без ответа: {len(unanswered)} | 📋 С ответом: {len(answered)} | ✅ Закрыто: {closed_count}\n"
     buttons = []
     if unanswered:
-        msg += "❗ *Без ответа:*\n"
-        for tid, sname, mname, _ in unanswered[:10]:
-            msg += f"  #{tid} — {sname}\n"
-            buttons.append([InlineKeyboardButton(
-                text=f"❗ #{tid} {sname}",
-                callback_data=f"view_ticket_{tid}"
-            )])
-
-    if assigned:
-        msg += "\n📋 *С ответом:*\n"
-        for tid, sname, mname, _ in assigned[:5]:
-            mod_info = f" → {mname}" if mname else ""
-            msg += f"  #{tid} — {sname}{mod_info}\n"
+        msg += "\n*❗ Без ответа:*\n" + "".join(f"  #{t[0]} {t[1]}\n" for t in unanswered[:10])
+        for tid, name, _ in unanswered[:10]:
+            buttons.append([InlineKeyboardButton(text=f"❗ #{tid} {name}", callback_data=f"enter_chat_{tid}")])
+    if answered:
+        msg += "\n*📋 С ответом:*\n" + "".join(f"  #{t[0]} {t[1]}\n" for t in answered[:5])
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
     try: await callback.message.delete()
@@ -382,31 +362,34 @@ async def support_admin(callback: CallbackQuery):
     await callback.message.answer(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
-@router.callback_query(F.data.startswith("view_ticket_"))
-async def view_ticket(callback: CallbackQuery):
-    ticket_id = int(callback.data.split("_")[2])
+# ── Обращения мероприятия (для кнопки в мероприятии у модератора) ─────────────
+@router.callback_query(F.data.startswith("event_support_admin_"))
+async def event_support_admin(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
+    event_id = int(callback.data.split("_")[3])
+
     with Session() as session:
-        ticket = session.query(SupportTicket).get(ticket_id)
-        if not ticket: return await callback.answer("Тикет не найден")
-        messages = session.query(SupportMessage).filter_by(ticket_id=ticket_id).order_by(SupportMessage.sent_at).all()
-        student = session.query(Student).filter_by(telegram_id=ticket.student_telegram_id).first()
-        student_name = student.full_name if student else f"ID: {ticket.student_telegram_id}"
-        history = []
-        for sm in messages:
-            role = "👤 Студент" if sm.sender_id == ticket.student_telegram_id else "🛡 Модератор"
-            ts = sm.sent_at.strftime("%d.%m %H:%M")
-            text = sm.text or f"[{sm.file_type}]"
-            history.append(f"[{ts}] {role}: {text}")
+        # Тикеты связанные с этим мероприятием
+        tickets = session.query(SupportTicket).filter(
+            SupportTicket.status == 'open',
+            SupportTicket.event_id == event_id
+        ).order_by(SupportTicket.created_at.desc()).all()
 
-    msg = f"📋 *Тикет #{ticket_id}*\n👤 {student_name}\n\n"
-    msg += "\n".join(history) if history else "(нет сообщений)"
+        buttons = []
+        for t in tickets:
+            student = session.query(Student).filter_by(telegram_id=t.student_telegram_id).first()
+            name = student.full_name if student else f"ID:{t.student_telegram_id}"
+            has_reply = session.query(SupportMessage).filter(
+                SupportMessage.ticket_id == t.id,
+                SupportMessage.sender_id != t.student_telegram_id
+            ).first() is not None
+            icon = "📋" if has_reply else "❗"
+            buttons.append([InlineKeyboardButton(text=f"{icon} #{t.id} {name}", callback_data=f"enter_chat_{t.id}")])
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Ответить",            callback_data=f"reply_ticket_{ticket_id}")],
-        [InlineKeyboardButton(text="🔄 Передать",            callback_data=f"transfer_choose_{ticket_id}")],
-        [InlineKeyboardButton(text="✅ Закрыть",             callback_data=f"close_ticket_{ticket_id}")],
-        [InlineKeyboardButton(text="⬅️ Назад",              callback_data="support_admin")],
-    ])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"event_{event_id}")])
     try: await callback.message.delete()
     except Exception: pass
-    await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
+    await callback.message.answer(
+        f"🆘 Обращения мероприятия ({len(tickets)}):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
