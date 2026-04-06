@@ -166,8 +166,9 @@ class SupportTicket(Base):
     __tablename__ = 'support_tickets'
     id = Column(Integer, primary_key=True)
     student_telegram_id = Column(Integer, nullable=False)
-    moderator_telegram_id = Column(Integer, nullable=True)  # назначенный модератор
-    status = Column(String(20), default='open')   # open / closed
+    moderator_telegram_id = Column(Integer, nullable=True)
+    status = Column(String(20), default='open')
+    event_id = Column(Integer, ForeignKey('events.id'), nullable=True)  # если с мероприятия
     created_at = Column(DateTime, default=datetime.utcnow)
     messages = relationship("SupportMessage", back_populates="ticket")
 
