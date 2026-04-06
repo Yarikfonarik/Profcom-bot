@@ -17,11 +17,14 @@ router = Router()
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("👋", reply_markup=REMOVE_KEYBOARD)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Начать", callback_data="begin_register")],
-        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")],
-    ])
-    await message.answer("Добро пожаловать! Нажми кнопку ниже, чтобы начать:", reply_markup=kb)
+    await message.answer(
+        "🚀 *Добро пожаловать!*\n\nНажми кнопку чтобы начать или войти.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Начало", callback_data="begin_register")],
+            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")],
+        ])
+    )
 
 
 @router.callback_query(F.data == "begin_register")
@@ -32,10 +35,12 @@ async def handle_start(callback: CallbackQuery, state: FSMContext):
 
     if student:
         is_admin = user_id in ADMIN_IDS
-        await callback.message.answer("✅ Ты уже зарегистрирован.", reply_markup=main_menu_keyboard(is_admin))
+        try: await callback.message.delete()
+        except Exception: pass
+        await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
     else:
         await callback.message.answer(
-            "👋 Привет!\n\nВведи свой баркод\n(13 цифр без пробелов)\n\nПример: 2004111111111"
+            "👋 Привет!\n\nВведи свой баркод (13 цифр без пробелов)\n\nПример: 2004111111111"
         )
         await state.set_state(StudentVerificationState.AWAITING_BARCODE)
 
@@ -48,31 +53,24 @@ async def register_by_barcode(message: Message, state: FSMContext):
 
     with Session() as session:
         student = session.query(Student).filter_by(barcode=barcode).first()
-
         if not student:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🆘 Написать в поддержку", callback_data="support_unreg")]
-            ])
             return await message.answer(
-                "❌ Студент с таким баркодом не найден.\n\n"
-                "Обратись в Профком:\n📍 И-108\n📲 https://vk.com/profkom21?from=groups",
-                reply_markup=kb
+                "❌ Студент с таким баркодом не найден.\n\nОбратись в Профком:\n📍 И-108",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")]
+                ])
             )
-
         if student.telegram_id and student.telegram_id != message.from_user.id:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🆘 Написать в поддержку", callback_data="support_unreg")]
-            ])
             return await message.answer(
-                "⚠️ Этот баркод уже зарегистрирован другим пользователем.\n\n"
-                "Обратись в Профком:\n📍 И-108\n📲 https://vk.com/profkom21?from=groups",
-                reply_markup=kb
+                "⚠️ Этот баркод уже зарегистрирован другим пользователем.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")]
+                ])
             )
-
         student.telegram_id = message.from_user.id
         session.commit()
 
     await state.clear()
     is_admin = message.from_user.id in ADMIN_IDS
     await message.answer("✅ Готово! Ты успешно зарегистрирован.")
-    await message.answer("📋 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
+    await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
