@@ -11,48 +11,58 @@ router = Router()
 BACK_KB = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")]])
 
 
-def _profile_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="🏆 Рейтинг",             callback_data="rating_all")],
-        [InlineKeyboardButton(text="📝 Мои задания",          callback_data="my_tasks_done")],
-        [InlineKeyboardButton(text="🛍 Мои покупки",          callback_data="my_purchases")],
-        [InlineKeyboardButton(text="📥 Мои мероприятия",      callback_data="my_events_list")],
-        [InlineKeyboardButton(text="📷 Мой QR-код",           callback_data="my_qr")],
-        [InlineKeyboardButton(text="⬅️ Назад",               callback_data="menu_back")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def _profile_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 Рейтинг",        callback_data="rating_all")],
+        [InlineKeyboardButton(text="📝 Мои задания",     callback_data="my_tasks_done")],
+        [InlineKeyboardButton(text="🛍 Мои покупки",     callback_data="my_purchases")],
+        [InlineKeyboardButton(text="📥 Мои мероприятия", callback_data="my_events_list")],
+        [InlineKeyboardButton(text="⬅️ Назад",          callback_data="menu_back")],
+    ])
 
 
-async def _build_profile_caption(student_id: int) -> str:
+async def _send_profile_with_qr(message, user_id: int):
+    """Отправляет профиль с QR. QR берётся из кэша или генерируется и кэшируется."""
     with Session() as session:
-        s = session.query(Student).get(student_id)
+        student = session.query(Student).filter_by(telegram_id=user_id).first()
+        if not student:
+            await message.answer("❌ Ты не зарегистрирован.")
+            return
+
         rank = session.execute(
             text("SELECT rank FROM (SELECT id, RANK() OVER (ORDER BY balance DESC) as rank FROM students) r WHERE id = :id"),
-            {"id": student_id}
+            {"id": student.id}
         ).scalar()
         tasks_done = session.execute(
             text("SELECT COUNT(*) FROM task_verifications WHERE student_id = :id AND status = 'approved'"),
-            {"id": student_id}
+            {"id": student.id}
         ).scalar()
         purchases_count = session.execute(
             text("SELECT COUNT(*) FROM purchases WHERE student_id = :id"),
-            {"id": student_id}
+            {"id": student.id}
         ).scalar()
         events_count = session.execute(
             text("SELECT COUNT(*) FROM event_participants WHERE student_id = :id"),
-            {"id": student_id}
+            {"id": student.id}
         ).scalar()
         active_events = session.execute(text("""
             SELECT e.title, ep.event_balance FROM event_participants ep
             JOIN events e ON e.id = ep.event_id
             WHERE ep.student_id = :sid AND e.status = 'active'
-        """), {"sid": student_id}).fetchall()
+        """), {"sid": student.id}).fetchall()
+
+        student_id  = student.id
+        qr_file_id  = student.qr_file_id
+        barcode     = student.barcode
+        full_name   = student.full_name
+        faculty     = student.faculty
+        balance     = student.balance
 
     caption = (
-        f"👤 {s.full_name}\n"
-        f"🔢 Баркод: {s.barcode}\n"
-        f"🏛 Факультет: {s.faculty or '—'}\n\n"
-        f"💰 Основной баланс: {s.balance}\n"
+        f"👤 {full_name}\n"
+        f"🔢 Баркод: {barcode}\n"
+        f"🏛 Факультет: {faculty or '—'}\n\n"
+        f"💰 Основной баланс: {balance}\n"
         f"🏆 Место в рейтинге: #{rank}\n\n"
         f"📝 Заданий выполнено: {tasks_done}\n"
         f"🛍 Покупок: {purchases_count}\n"
@@ -62,117 +72,47 @@ async def _build_profile_caption(student_id: int) -> str:
         caption += "\n🎪 Активные мероприятия:\n"
         for ev_title, ev_bal in active_events:
             caption += f"  • {ev_title}: {ev_bal} б.\n"
-    return caption
 
+    kb = _profile_kb()
 
-async def show_my_profile_msg(message: Message):
-    """Показать профиль как обычное сообщение (из команды /profile)."""
-    user_id = message.from_user.id
-    with Session() as session:
-        student = session.query(Student).filter_by(telegram_id=user_id).first()
-        if not student:
-            return await message.answer("❌ Ты не зарегистрирован.")
-        student_id = student.id
-        qr_file_id = student.qr_file_id
-        barcode = student.barcode
-
-    caption = await _build_profile_caption(student_id)
-    kb = _profile_kb(user_id in ADMIN_IDS)
-
+    # Пробуем кэшированный QR
     if qr_file_id:
         try:
             await message.answer_photo(photo=qr_file_id, caption=caption, reply_markup=kb)
             return
         except Exception:
-            pass
-
-    # Без QR — просто текст (быстро)
-    await message.answer(caption, reply_markup=kb)
-
-
-@router.callback_query(F.data == "my_profile")
-async def show_my_profile(callback: CallbackQuery, bot: Bot):
-    user_id = callback.from_user.id
-    try: await callback.message.delete()
-    except Exception: pass
-
-    with Session() as session:
-        student = session.query(Student).filter_by(telegram_id=user_id).first()
-        if not student:
-            return await callback.message.answer("❌ Ты не зарегистрирован.")
-        student_id = student.id
-        qr_file_id = student.qr_file_id
-        barcode = student.barcode
-
-    caption = await _build_profile_caption(student_id)
-    kb = _profile_kb(user_id in ADMIN_IDS)
-
-    # Сначала отправляем без QR — быстро
-    msg = await callback.message.answer(caption, reply_markup=kb)
-
-    # Если есть кэшированный QR — обновляем сообщение (редко нужен перегруз)
-    if qr_file_id:
-        try:
-            await msg.delete()
-            await callback.message.answer_photo(photo=qr_file_id, caption=caption, reply_markup=kb)
-        except Exception:
-            pass  # оставляем текстовое
-
-
-@router.callback_query(F.data == "my_qr")
-async def show_my_qr(callback: CallbackQuery, bot: Bot):
-    user_id = callback.from_user.id
-    with Session() as session:
-        student = session.query(Student).filter_by(telegram_id=user_id).first()
-        if not student:
-            return await callback.answer("❌ Не зарегистрирован", show_alert=True)
-        student_id = student.id
-        barcode = student.barcode
-        qr_file_id = student.qr_file_id
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Пересоздать QR", callback_data="refresh_qr")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")],
-    ])
-
-    await callback.answer("⏳ Загружаю QR...")
-    try: await callback.message.delete()
-    except Exception: pass
-
-    if qr_file_id:
-        try:
-            await callback.message.answer_photo(photo=qr_file_id, caption=f"📷 QR-код\n`{barcode}`", parse_mode="Markdown", reply_markup=kb)
-            return
-        except Exception:
+            # Кэш устарел — сброс
             with Session() as session:
                 s = session.query(Student).get(student_id)
-                if s: s.qr_file_id = None; session.commit()
+                if s:
+                    s.qr_file_id = None
+                    session.commit()
 
+    # Генерируем новый QR и кэшируем
     try:
         from qr_generator import generate_qr_bytes
         qr_bytes = generate_qr_bytes(barcode)
         file = BufferedInputFile(qr_bytes, filename=f"qr_{barcode}.png")
-        msg = await callback.message.answer_photo(photo=file, caption=f"📷 QR-код\n`{barcode}`", parse_mode="Markdown", reply_markup=kb)
+        sent = await message.answer_photo(photo=file, caption=caption, reply_markup=kb)
+        new_fid = sent.photo[-1].file_id
         with Session() as session:
             s = session.query(Student).get(student_id)
-            if s: s.qr_file_id = msg.photo[-1].file_id; session.commit()
-    except Exception as e:
-        await callback.message.answer(f"❌ Не удалось сгенерировать QR: {e}", reply_markup=kb)
+            if s:
+                s.qr_file_id = new_fid
+                session.commit()
+    except Exception:
+        # Нет QR — просто текст
+        await message.answer(caption, reply_markup=kb)
 
 
-@router.callback_query(F.data == "refresh_qr")
-async def refresh_qr(callback: CallbackQuery, bot: Bot):
-    user_id = callback.from_user.id
-    with Session() as session:
-        student = session.query(Student).filter_by(telegram_id=user_id).first()
-        if student: student.qr_file_id = None; session.commit()
+@router.callback_query(F.data == "my_profile")
+async def show_my_profile(callback: CallbackQuery, bot: Bot):
     try: await callback.message.delete()
     except Exception: pass
-    callback.data = "my_qr"
-    await show_my_qr(callback, bot)
+    await _send_profile_with_qr(callback.message, callback.from_user.id)
 
 
-# ── Детали профиля ────────────────────────────────────────────────────────────
+# ── Детали профиля ─────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "my_tasks_done")
 async def my_tasks_done(callback: CallbackQuery):
@@ -187,11 +127,9 @@ async def my_tasks_done(callback: CallbackQuery):
             ORDER BY tv.submitted_at DESC
         """), {"id": student.id}).fetchall()
 
-    if not rows:
-        msg = "📝 Ты ещё не выполнил ни одного задания."
-    else:
-        lines = [f"{i}. ✅ {r[0]} — {r[1]} б. ({r[2].strftime('%d.%m')})" for i, r in enumerate(rows, 1)]
-        msg = f"📝 *Выполненные задания* ({len(rows)}):\n\n" + "\n".join(lines)
+    msg = f"📝 *Выполненные задания* ({len(rows)}):\n\n" + "\n".join(
+        f"{i}. ✅ {r[0]} — {r[1]} б. ({r[2].strftime('%d.%m')})" for i, r in enumerate(rows, 1)
+    ) if rows else "📝 Ты ещё не выполнил ни одного задания."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]])
     try: await callback.message.delete()
@@ -206,20 +144,15 @@ async def my_events_list(callback: CallbackQuery):
         student = session.query(Student).filter_by(telegram_id=user_id).first()
         if not student: return await callback.answer("❌ Не зарегистрирован", show_alert=True)
         rows = session.execute(text("""
-            SELECT e.title, e.status, ep.event_balance, ep.registered_at
+            SELECT e.id, e.title, e.status, ep.event_balance
             FROM event_participants ep JOIN events e ON e.id = ep.event_id
             WHERE ep.student_id = :id ORDER BY ep.registered_at DESC
         """), {"id": student.id}).fetchall()
 
-    if not rows:
-        msg = "📥 Ты ещё не участвовал ни в одном мероприятии."
-    else:
-        lines = []
-        for r in rows:
-            icon = "🟢" if r[1] == "active" else "🔴"
-            bal = f" | {r[2]} б." if r[1] == "active" else ""
-            lines.append(f"{icon} {r[0]}{bal}")
-        msg = f"📥 *Мои мероприятия* ({len(rows)}):\n\n" + "\n".join(lines)
+    msg = f"📥 *Мои мероприятия* ({len(rows)}):\n\n" + "\n".join(
+        f"{'🟢' if r[2] == 'active' else '🔴'} {r[1]}" + (f" | {r[3]} б." if r[2] == 'active' else "")
+        for r in rows
+    ) if rows else "📥 Ты ещё не участвовал ни в одном мероприятии."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]])
     try: await callback.message.delete()
@@ -242,6 +175,7 @@ async def my_purchases(callback: CallbackQuery):
             total_spent += p.total_points
 
     msg = f"🧾 *Покупки* ({len(items_info)} шт., {total_spent} б.):\n\n" + "\n".join(items_info) if items_info else "🧾 Покупок пока нет."
+    # Кнопка назад — в профиль, не в магазин
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_profile")]])
     try: await callback.message.delete()
     except Exception: pass
@@ -273,7 +207,7 @@ async def show_rating(callback: CallbackQuery):
     await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
 
 
-# ── Статистика заданий (модератор) ───────────────────────────────────────────
+# ── Статистика заданий ─────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "task_stats_menu")
 async def task_stats_menu(callback: CallbackQuery):
@@ -306,7 +240,7 @@ async def task_stat_detail(callback: CallbackQuery):
             WHERE tv.task_id=:id AND tv.status='approved' ORDER BY tv.submitted_at DESC LIMIT 5
         """), {"id": task_id}).fetchall()
 
-    msg = f"📌 *{task.title}*\n\n✅ Выполнили: {approved}\n⏳ На проверке: {pending}\n❌ Отклонено: {rejected}\n"
+    msg = f"📌 *{task.title}*\n\n✅ {approved} | ⏳ {pending} | ❌ {rejected}\n"
     if recent:
         msg += "\n*Последние:*\n" + "".join(f"• {n} — {d.strftime('%d.%m %H:%M')}\n" for n, d in recent)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="task_stats_menu")]])
@@ -315,7 +249,7 @@ async def task_stat_detail(callback: CallbackQuery):
     await callback.message.answer(msg, parse_mode="Markdown", reply_markup=kb)
 
 
-# ── Статистика магазина (модератор) ──────────────────────────────────────────
+# ── Статистика магазина ────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "shop_stats_menu")
 async def shop_stats_menu(callback: CallbackQuery):
@@ -347,7 +281,7 @@ async def shop_stat_detail(callback: CallbackQuery):
             WHERE p.merch_id=:id ORDER BY p.purchased_at DESC LIMIT 5
         """), {"id": item_id}).fetchall()
 
-    msg = f"🛍 *{item.name}*\n\n🛒 Куплено: {bought}\n💰 Баллов: {spent}\n📦 Остаток: {item.stock}\n"
+    msg = f"🛍 *{item.name}*\n\n🛒 {bought} | 💰 {spent} б. | 📦 {item.stock}\n"
     if recent:
         msg += "\n*Последние:*\n" + "".join(f"• {n} — {d.strftime('%d.%m %H:%M')}\n" for n, d in recent)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="shop_stats_menu")]])
