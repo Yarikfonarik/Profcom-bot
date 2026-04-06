@@ -86,3 +86,17 @@ with engine.connect() as conn:
             print(f"✅ {sql.strip()[:65].replace(chr(10),' ')}")
         except Exception as e:
             print(f"⚠️  {e}")
+
+# Дополнительные поля для SupportTicket
+extra_migrations = [
+    "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS event_id INTEGER REFERENCES events(id);",
+]
+
+with engine.connect() as conn2:
+    for sql in extra_migrations:
+        try:
+            conn2.execute(text(sql))
+            conn2.commit()
+            print(f"✅ {sql[:65]}")
+        except Exception as e:
+            print(f"⚠️  {e}")
