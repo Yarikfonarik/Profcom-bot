@@ -311,4 +311,4 @@ async def show_admin_stats(callback: CallbackQuery):
     )
     try: await callback.message.delete()
     except Exception: pass
-    await callback.message.answer(msg, parse_mode="Markdown", reply_markup=BACK_KB)
+    await callback.message.answer(msg, parse_mode="Markdown", reply_markup=BACK_KB
