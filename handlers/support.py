@@ -392,4 +392,4 @@ async def event_support_admin(callback: CallbackQuery):
     await callback.message.answer(
         f"🆘 Обращения мероприятия ({len(tickets)}):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    
+    )
