@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://bothost_db_f5c7e4fb86d6:4MDpWFhEw89fNp8FXuJk0aYEDceyB7qp_FZ5nLAVkjQ@node1.pghost.ru:15518/bothost_db_f5c7e4fb86d6"
+    "postgresql://bothost_db_e2e047a4dcdc:zRntCD9UJqr9eO5DDjyENmu5czyHyyZaYvlpTZTk3ss@node1.pghost.ru:15550/bothost_db_e2e047a4dcdc"
 )
 
 if DATABASE_URL.startswith("postgres://"):
