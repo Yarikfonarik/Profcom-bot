@@ -1080,7 +1080,6 @@ async def do_close_event(callback: CallbackQuery):
     await callback.message.answer(f"🔴 *{title}* закрыто.", parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 К мероприятиям", callback_data="menu_events")]]))
 
-
 @router.callback_query(F.data == "all_events_admin")
 async def all_events_admin(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
