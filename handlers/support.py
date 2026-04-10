@@ -10,7 +10,7 @@ from states import SupportState
 
 router = Router()
 
-# Активные чат-сессии: {user_id: ticket_id}
+
 # Если пользователь в чате — сообщения идут напрямую в тикет без state
 _active_chat: dict[int, int] = {}
 
