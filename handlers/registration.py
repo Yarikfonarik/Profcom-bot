@@ -12,7 +12,6 @@ from keyboards import main_menu_keyboard, REMOVE_KEYBOARD
 
 router = Router()
 
-
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
