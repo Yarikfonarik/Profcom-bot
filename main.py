@@ -37,13 +37,13 @@ async def main():
 
     dp.include_router(registration.router)
     dp.include_router(navigation.router)
-    dp.include_router(support.router)
     dp.include_router(events.router)
     dp.include_router(tasks.router)
     dp.include_router(shop.router)
     dp.include_router(statistics.router)
     dp.include_router(admin_students.router)
     dp.include_router(notifications.router)
+    dp.include_router(support.router)   # ПОСЛЕДНИМ — содержит catch-all хендлер
 
     await set_commands(bot)
     logging.info("Бот запущен ✅")
