@@ -5,6 +5,7 @@ from datetime import datetime
 
 Base = declarative_base()
 
+
 class Student(Base):
     __tablename__ = 'students'
     id = Column(Integer, primary_key=True)
