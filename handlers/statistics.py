@@ -301,7 +301,6 @@ async def show_admin_stats(callback: CallbackQuery):
         active_ev  = session.query(Event).filter_by(status='active').count()
         total_parts= session.execute(text("SELECT COUNT(*) FROM event_participants")).scalar()
 
-    
     msg = (
         f"📊 *Статистика системы*\n\n"
         f"👥 Студентов: {total} (активных: {active_s})\n"
