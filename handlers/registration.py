@@ -21,7 +21,8 @@ router = Router()
 # Переменные окружения — добавь в BotHost
 NOTISEND_PROJECT = os.environ.get("NOTISEND_PROJECT", "")
 NOTISEND_API_KEY = os.environ.get("NOTISEND_API_KEY", "")
-NOTISEND_SENDER  = os.environ.get("NOTISEND_SENDER", "ProfkomCHGU")
+# Если NOTISEND_SENDER пустой — поле sender не будет передаваться в API
+NOTISEND_SENDER  = os.environ.get("NOTISEND_SENDER", "")
 
 # Временное хранилище кодов: {user_id: {"code": "123456", "phone": "+7..."}}
 _pending_codes: dict[int, dict] = {}
@@ -45,6 +46,14 @@ def _is_valid_phone(phone: str) -> bool:
     return bool(re.match(r"^\+7\d{10}$", phone))
 
 
+def _normalize_date(raw: str) -> str:
+    """
+    Нормализует дату: заменяет запятые и пробелы на точки.
+    01,01,2000 → 01.01.2000
+    """
+    return re.sub(r"[,\s/\-]+", ".", raw.strip())
+
+
 def _make_sign(params: dict, api_key: str) -> str:
     """
     Формирует подпись NotiSend:
@@ -61,9 +70,9 @@ def _make_sign(params: dict, api_key: str) -> str:
 
 async def _send_otp(phone: str, code: str) -> dict:
     """
-    Отправляет OTP через NotiSend.ru в режиме Telegram Gateway.
-    Сообщение содержит 6-значный код — NotiSend автоматически
-    направит его в Telegram (настрой режим «Только Telegram» в ЛК NotiSend).
+    Отправляет OTP через NotiSend.ru.
+    Если NOTISEND_SENDER не задан — поле sender не передаётся,
+    чтобы избежать ошибки 8 (invalid sender).
     """
     message_text = f"Ваш код подтверждения Профком ЧГУ: {code}"
 
@@ -74,8 +83,12 @@ async def _send_otp(phone: str, code: str) -> dict:
         "message":    message_text,
         "project":    NOTISEND_PROJECT,
         "recipients": phone_digits,
-        "sender":     NOTISEND_SENDER,
     }
+
+    # Добавляем sender только если он задан и одобрен в ЛК NotiSend
+    if NOTISEND_SENDER:
+        params["sender"] = NOTISEND_SENDER
+
     sign = _make_sign(params, NOTISEND_API_KEY)
     params["sign"] = sign
 
@@ -86,7 +99,31 @@ async def _send_otp(phone: str, code: str) -> dict:
                 return await resp.json(content_type=None)
             except Exception:
                 text = await resp.text()
-                return {"ok": False, "description": text}
+                return {"status": "error", "message": text}
+
+
+def _is_send_success(result) -> bool:
+    """Проверяет успешность ответа NotiSend."""
+    if isinstance(result, list):
+        return True
+    if isinstance(result, dict):
+        # Успех: status == 'ok' или есть поле 'id'
+        if result.get("status") == "ok":
+            return True
+        if result.get("id"):
+            return True
+    return False
+
+
+def _get_send_error(result) -> str:
+    """Извлекает читаемое сообщение об ошибке из ответа NotiSend."""
+    if isinstance(result, dict):
+        msg = result.get("message", "")
+        err = result.get("error", "")
+        if msg:
+            return f"{msg} (код {err})" if err else msg
+        return str(result)
+    return str(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,15 +202,13 @@ async def auth_phone_receive(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
     # Отправляем через NotiSend
-    await message.answer("⏳ Отправляем код подтверждения в Telegram...")
+    await message.answer("⏳ Отправляем код подтверждения...")
     result = await _send_otp(phone, code)
 
-    # NotiSend возвращает список сообщений при успехе
-    success = isinstance(result, list) or (isinstance(result, dict) and result.get("id"))
-    if not success:
-        error = result.get("description", str(result)) if isinstance(result, dict) else str(result)
+    if not _is_send_success(result):
+        error_msg = _get_send_error(result)
         return await message.answer(
-            f"❌ Не удалось отправить код: {error}\n\n"
+            f"❌ Не удалось отправить код: {error_msg}\n\n"
             "Попробуйте войти по баркоду:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔢 Войти по баркоду", callback_data="auth_barcode")]
@@ -186,7 +221,7 @@ async def auth_phone_receive(message: Message, state: FSMContext):
     await state.update_data(phone=phone, student_id=student.id)
     await state.set_state(PhoneAuthState.AWAITING_CODE)
     await message.answer(
-        f"✅ Код отправлен в Telegram на номер {phone}!\n\n"
+        f"✅ Код отправлен на номер {phone}!\n\n"
         "Введите 6-значный код:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Отправить снова", callback_data="resend_code")],
@@ -207,8 +242,19 @@ async def resend_code(callback: CallbackQuery, state: FSMContext):
     _pending_codes[user_id] = {**_pending_codes.get(user_id, {}), "code": code}
 
     await callback.answer("⏳ Отправляем...")
-    await _send_otp(phone, code)
-    await callback.message.answer("✅ Новый код отправлен! Введите его:")
+    result = await _send_otp(phone, code)
+
+    if _is_send_success(result):
+        await callback.message.answer("✅ Новый код отправлен! Введите его:")
+    else:
+        error_msg = _get_send_error(result)
+        await callback.message.answer(
+            f"❌ Не удалось отправить код повторно: {error_msg}\n\n"
+            "Попробуйте войти по баркоду:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔢 Войти по баркоду", callback_data="auth_barcode")]
+            ])
+        )
 
 
 @router.message(PhoneAuthState.AWAITING_CODE)
@@ -332,13 +378,19 @@ async def start_reg_request(callback: CallbackQuery, state: FSMContext):
 @router.message(RegistrationRequestState.AWAITING_FIO)
 async def reg_request_fio(message: Message, state: FSMContext):
     await state.update_data(full_name=message.text.strip())
-    await message.answer("*2. Дата рождения* (например: 01.01.2000):", parse_mode="Markdown")
+    await message.answer(
+        "*2. Дата рождения* (например: 01.01.2000 или 01,01,2000):",
+        parse_mode="Markdown"
+    )
     await state.set_state(RegistrationRequestState.AWAITING_BIRTH_DATE)
 
 
 @router.message(RegistrationRequestState.AWAITING_BIRTH_DATE)
 async def reg_request_birth(message: Message, state: FSMContext):
-    await state.update_data(birth_date=message.text.strip())
+    # Нормализуем дату: запятые/дефисы/слеши → точки
+    raw_date = message.text.strip() if message.text else ""
+    normalized_date = _normalize_date(raw_date)
+    await state.update_data(birth_date=normalized_date)
     await message.answer("*3. Факультет / Институт:*", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_FACULTY)
 
