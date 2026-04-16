@@ -1,6 +1,7 @@
 # states.py
 from aiogram.fsm.state import StatesGroup, State
 
+
 class TaskState(StatesGroup):
     AWAITING_TITLE = State()
     AWAITING_DESCRIPTION = State()
@@ -14,12 +15,14 @@ class TaskState(StatesGroup):
     waiting_answer = State()
     waiting_proof = State()
 
+
 class ItemCreateState(StatesGroup):
     AWAITING_NAME = State()
     AWAITING_DESCRIPTION = State()
     AWAITING_PRICE = State()
     AWAITING_STOCK = State()
     AWAITING_IMAGE = State()
+
 
 class ItemEditState(StatesGroup):
     AWAITING_FIELD = State()
@@ -30,25 +33,32 @@ class ItemEditState(StatesGroup):
     editing_stock = State()
     editing_photo = State()
 
+
 class StudentVerificationState(StatesGroup):
     AWAITING_BARCODE = State()
 
+
 class StudentSearchState(StatesGroup):
     AWAITING_INPUT = State()
+
 
 class StudentEditState(StatesGroup):
     AWAITING_FIELD = State()
     AWAITING_VALUE = State()
 
+
 class ImportState(StatesGroup):
     AWAITING_FILE = State()
+
 
 class SupportState(StatesGroup):
     AWAITING_MESSAGE = State()
     AWAITING_REPLY = State()
 
+
 class AdminMsgState(StatesGroup):
     AWAITING_MESSAGE = State()
+
 
 class EventCreateState(StatesGroup):
     AWAITING_TITLE = State()
@@ -60,14 +70,36 @@ class EventCreateState(StatesGroup):
     AWAITING_IMAGE = State()
     AWAITING_HOW_TO_JOIN = State()
 
+
 class LectureCreateState(StatesGroup):
     AWAITING_TITLE = State()
     AWAITING_POINTS = State()
+
 
 class EventScanState(StatesGroup):
     REGISTER_PARTICIPANTS = State()
     SCAN_LECTURE = State()
 
+
 class EventMerchEditState(StatesGroup):
     AWAITING_STOCK = State()
     AWAITING_PRICE = State()
+
+
+# ── Авторизация по телефону ───────────────────────────────────────────────────
+class PhoneAuthState(StatesGroup):
+    AWAITING_PHONE = State()       # ввод номера телефона
+    AWAITING_CODE = State()        # ввод кода подтверждения
+
+
+# ── Заявка на регистрацию ─────────────────────────────────────────────────────
+class RegistrationRequestState(StatesGroup):
+    AWAITING_FIO = State()
+    AWAITING_BIRTH_DATE = State()
+    AWAITING_FACULTY = State()
+    AWAITING_PHONE = State()
+
+
+# ── Ответ на заявку (admin) ───────────────────────────────────────────────────
+class RegRequestReplyState(StatesGroup):
+    AWAITING_MESSAGE = State()
