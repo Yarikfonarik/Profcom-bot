@@ -13,6 +13,7 @@ from database import engine
 from handlers import (
     navigation, registration, tasks, shop,
     statistics, events, admin_students, notifications, support,
+    reg_requests,
 )
 
 
@@ -43,6 +44,7 @@ async def main():
     dp.include_router(statistics.router)
     dp.include_router(admin_students.router)
     dp.include_router(notifications.router)
+    dp.include_router(reg_requests.router)
     dp.include_router(support.router)   # ПОСЛЕДНИМ — содержит catch-all хендлер
 
     await set_commands(bot)
