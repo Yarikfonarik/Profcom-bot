@@ -107,8 +107,8 @@ def _is_send_success(result) -> bool:
     if isinstance(result, list):
         return True
     if isinstance(result, dict):
-        # Успех: status == 'ok' или есть поле 'id'
-        if result.get("status") == "ok":
+        # Успех: status == 'ok' / 'success' или есть поле 'id'
+        if result.get("status") in ("ok", "success"):
             return True
         if result.get("id"):
             return True
