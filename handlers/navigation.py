@@ -101,6 +101,7 @@ async def admin_panel(callback: CallbackQuery):
             [InlineKeyboardButton(text="📝 Статистика заданий",  callback_data="task_stats_menu")],
             [InlineKeyboardButton(text="🛍 Статистика магазина", callback_data="shop_stats_menu")],
             [InlineKeyboardButton(text="🆘 Обращения",           callback_data="support_admin")],
+            [InlineKeyboardButton(text="📋 Заявки на регистрацию", callback_data="reg_requests_admin")],
             [InlineKeyboardButton(text="🔁 Сбросить данные",     callback_data="reset_menu")],
             [InlineKeyboardButton(text="⬅️ Главное меню",        callback_data="menu_back")],
         ])
