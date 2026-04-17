@@ -3,10 +3,15 @@ from sqlalchemy import text
 from database import engine
 
 migrations = [
-    # КРИТИЧНО: telegram_id должен быть BIGINT (Telegram ID > 2^31)
+    # КРИТИЧНО: BigInteger везде где telegram_id
     "ALTER TABLE students ALTER COLUMN telegram_id TYPE BIGINT;",
+    "ALTER TABLE registration_requests ALTER COLUMN telegram_id TYPE BIGINT;",
+    "ALTER TABLE support_tickets ALTER COLUMN student_telegram_id TYPE BIGINT;",
+    "ALTER TABLE support_tickets ALTER COLUMN moderator_telegram_id TYPE BIGINT;",
+    "ALTER TABLE support_messages ALTER COLUMN sender_id TYPE BIGINT;",
+    "ALTER TABLE reg_request_messages ALTER COLUMN sender_id TYPE BIGINT;",
 
-    # Остальные миграции
+    # Остальные
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline TIMESTAMP;",
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;",
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS show_deadline BOOLEAN DEFAULT FALSE;",
@@ -29,13 +34,15 @@ migrations = [
     "ALTER TABLE event_merch ADD COLUMN IF NOT EXISTS custom_stock INTEGER;",
     "ALTER TABLE event_merch ADD COLUMN IF NOT EXISTS custom_price INTEGER;",
     "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS event_id INTEGER REFERENCES events(id);",
+
     """CREATE TABLE IF NOT EXISTS event_participants (
         id SERIAL PRIMARY KEY, event_id INTEGER REFERENCES events(id),
         student_id INTEGER REFERENCES students(id), event_balance INTEGER DEFAULT 0,
         registered_at TIMESTAMP DEFAULT NOW(), UNIQUE(event_id, student_id));""",
     """CREATE TABLE IF NOT EXISTS lectures (
         id SERIAL PRIMARY KEY, event_id INTEGER REFERENCES events(id),
-        title VARCHAR(255) NOT NULL, points INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());""",
+        title VARCHAR(255) NOT NULL, points INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW());""",
     """CREATE TABLE IF NOT EXISTS lecture_scans (
         id SERIAL PRIMARY KEY, lecture_id INTEGER REFERENCES lectures(id),
         student_id INTEGER REFERENCES students(id), scanned_at TIMESTAMP DEFAULT NOW(),
