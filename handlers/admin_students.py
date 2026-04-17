@@ -125,6 +125,8 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
             InlineKeyboardButton(text=f"{'✅ ' if current_status=='blocked' else ''}Заблокирован", callback_data=f"set_status_{student_id}_blocked"),
         ],
         [InlineKeyboardButton(text="🔄 Обновить QR",    callback_data=f"admin_refresh_qr_{student_id}")],
+        [InlineKeyboardButton(text="📱 Изм. телефон",  callback_data=f"sf_{student_id}_phone")],
+        [InlineKeyboardButton(text="🔓 Отвязать TG",   callback_data=f"unlink_tg_{student_id}")],
         [InlineKeyboardButton(text="💬 Написать",       callback_data=f"smsg_{student_id}")],
         [
             InlineKeyboardButton(text="🔍 Найти ещё",   callback_data="find_student"),
@@ -238,6 +240,7 @@ async def quick_edit_field(callback: CallbackQuery, state: FSMContext):
         "balance":   f"💰 Сейчас: {current}\nВведите баллы (500, +100, -50):",
         "faculty":   f"🏛 Сейчас: {current}\nВведите факультет:",
         "full_name": f"📝 Сейчас: {current}\nВведите ФИО:",
+        "phone":     f"📱 Сейчас: {current}\nВведите номер телефона (+79001234567):",
     }
     await state.update_data(student_id=student_id, field=field)
     await state.set_state(StudentEditState.AWAITING_VALUE)
@@ -309,6 +312,41 @@ async def do_reset_one(callback: CallbackQuery, state: FSMContext, bot: Bot):
     callback.data = f"stucard_{student_id}"
     await show_student_card(callback, state, bot)
 
+
+
+@router.callback_query(F.data.startswith("unlink_tg_"))
+async def unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
+    student_id = int(callback.data.split("_")[2])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if not s: return await callback.answer("Не найден")
+        name = s.full_name
+    await callback.message.answer(
+        f"⚠️ Отвязать Telegram от *{name}*?\n\nПосле отвязки студент сможет привязать новый аккаунт.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да, отвязать", callback_data=f"do_unlink_tg_{student_id}"),
+            InlineKeyboardButton(text="❌ Нет",          callback_data=f"stucard_{student_id}"),
+        ]])
+    )
+
+
+@router.callback_query(F.data.startswith("do_unlink_tg_"))
+async def do_unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
+    student_id = int(callback.data.split("_")[3])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if s:
+            s.telegram_id = None
+            s.qr_file_id = None
+            session.commit()
+    await callback.answer("✅ Telegram отвязан")
+    try: await callback.message.delete()
+    except Exception: pass
+    callback.data = f"stucard_{student_id}"
+    await show_student_card(callback, state, bot)
 
 @router.callback_query(F.data.startswith("admin_refresh_qr_"))
 async def admin_refresh_qr(callback: CallbackQuery, state: FSMContext, bot: Bot):
