@@ -177,7 +177,8 @@ async def event_page(callback: CallbackQuery):
 #  АДМИН ПАНЕЛЬ МЕРОПРИЯТИЯ
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("event_admin_"))
+@router.callback_query(F.data.startswith("event_admin_") &
+    ~F.data.startswith("event_admin_tasks_") & ~F.data.startswith("event_admin_merch_"))
 async def event_admin_page(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
     event_id = int(callback.data.split("_")[2])
