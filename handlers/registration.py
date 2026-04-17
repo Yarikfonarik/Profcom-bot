@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 
-from models import Student, RegistrationRequest, RegRequestMessage
+from models import Student, RegistrationRequest
 from states import (StudentVerificationState, PhoneAuthState, RegistrationRequestState)
 from database import Session
 from config import ADMIN_IDS
@@ -18,22 +18,15 @@ from keyboards import main_menu_keyboard, REMOVE_KEYBOARD
 
 router = Router()
 
-# Переменные окружения — добавь в BotHost
 NOTISEND_PROJECT = os.environ.get("NOTISEND_PROJECT", "")
-NOTISEND_API_KEY = os.environ.get("NOTISEND_API_KEY", "")
-# Если NOTISEND_SENDER пустой — поле sender не будет передаваться в API
-NOTISEND_SENDER  = os.environ.get("NOTISEND_SENDER", "")
+NOTISEND_API_KEY  = os.environ.get("NOTISEND_API_KEY", "")
+NOTISEND_SENDER   = os.environ.get("NOTISEND_SENDER", "Profkom")
 
-# Временное хранилище кодов: {user_id: {"code": "123456", "phone": "+7..."}}
+# Временные коды {user_id: {"code": "...", "phone": "...", "student_id": int}}
 _pending_codes: dict[int, dict] = {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _normalize_phone(raw: str) -> str:
-    """Приводит номер к формату +7XXXXXXXXXX."""
     digits = re.sub(r"\D", "", raw)
     if digits.startswith("8") and len(digits) == 11:
         digits = "7" + digits[1:]
@@ -46,88 +39,42 @@ def _is_valid_phone(phone: str) -> bool:
     return bool(re.match(r"^\+7\d{10}$", phone))
 
 
-def _normalize_date(raw: str) -> str:
-    """
-    Нормализует дату: заменяет запятые и пробелы на точки.
-    01,01,2000 → 01.01.2000
-    """
-    return re.sub(r"[,\s/\-]+", ".", raw.strip())
-
-
 def _make_sign(params: dict, api_key: str) -> str:
-    """
-    Формирует подпись NotiSend:
-    1. Сортируем параметры по ключу
-    2. Берём только значения, соединяем через ';', добавляем api_key
-    3. sha1 → md5
-    """
     sorted_values = [str(v) for _, v in sorted(params.items())]
     step1 = ";".join(sorted_values) + ";" + api_key
     step2 = hashlib.sha1(step1.encode("utf-8")).hexdigest()
-    sign  = hashlib.md5(step2.encode("utf-8")).hexdigest()
-    return sign
+    return hashlib.md5(step2.encode("utf-8")).hexdigest()
 
 
 async def _send_otp(phone: str, code: str) -> dict:
-    """
-    Отправляет OTP через NotiSend.ru.
-    Если NOTISEND_SENDER не задан — поле sender не передаётся,
-    чтобы избежать ошибки 8 (invalid sender).
-    """
     message_text = f"Ваш код подтверждения Профком ЧГУ: {code}"
-
-    # Номер без '+' для API
     phone_digits = phone.lstrip("+")
-
     params = {
         "message":    message_text,
         "project":    NOTISEND_PROJECT,
         "recipients": phone_digits,
+        "sender":     NOTISEND_SENDER,
     }
-
-    # Добавляем sender только если он задан и одобрен в ЛК NotiSend
-    if NOTISEND_SENDER:
-        params["sender"] = NOTISEND_SENDER
-
     sign = _make_sign(params, NOTISEND_API_KEY)
     params["sign"] = sign
-
     url = "https://sms.notisend.ru/api/message/send"
     async with aiohttp.ClientSession() as session:
         async with session.post(url, data=params) as resp:
-            try:
-                return await resp.json(content_type=None)
+            try: return await resp.json(content_type=None)
             except Exception:
-                text = await resp.text()
-                return {"status": "error", "message": text}
+                return {"status": "error", "message": await resp.text()}
 
 
 def _is_send_success(result) -> bool:
-    """Проверяет успешность ответа NotiSend."""
-    if isinstance(result, list):
-        return True
+    """NotiSend возвращает список при успехе или dict со status:success."""
+    if isinstance(result, list): return True
     if isinstance(result, dict):
-        # Успех: status == 'ok' / 'success' или есть поле 'id'
-        if result.get("status") in ("ok", "success"):
-            return True
-        if result.get("id"):
-            return True
+        return result.get("status") == "success"
     return False
 
 
-def _get_send_error(result) -> str:
-    """Извлекает читаемое сообщение об ошибке из ответа NotiSend."""
-    if isinstance(result, dict):
-        msg = result.get("message", "")
-        err = result.get("error", "")
-        if msg:
-            return f"{msg} (код {err})" if err else msg
-        return str(result)
-    return str(result)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-#  /start — главный вход
+#  /start
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.message(Command("start"))
@@ -147,16 +94,16 @@ async def cmd_start(message: Message, state: FSMContext):
         "🚀 *Добро пожаловать в Профком ЧГУ!*\n\nВыберите действие:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Войти по номеру телефона",  callback_data="auth_phone")],
-            [InlineKeyboardButton(text="🔢 Войти по баркоду",          callback_data="auth_barcode")],
+            [InlineKeyboardButton(text="📱 Войти по номеру телефона",   callback_data="auth_phone")],
+            [InlineKeyboardButton(text="🔢 Войти по баркоду",           callback_data="auth_barcode")],
             [InlineKeyboardButton(text="📝 Подать заявку на вступление", callback_data="request_registration")],
-            [InlineKeyboardButton(text="🆘 Поддержка",                 callback_data="support_unreg")],
+            [InlineKeyboardButton(text="🆘 Поддержка",                  callback_data="support_unreg")],
         ])
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  АВТОРИЗАЦИЯ ПО ТЕЛЕФОНУ (NotiSend → Telegram)
+#  АВТОРИЗАЦИЯ ПО ТЕЛЕФОНУ
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "auth_phone")
@@ -181,15 +128,13 @@ async def auth_phone_receive(message: Message, state: FSMContext):
             "❗ Неверный формат. Введите российский номер:\n+79001234567 или 89001234567"
         )
 
-    # Проверяем наличие номера в базе
     with Session() as session:
         student = session.query(Student).filter_by(phone=phone).first()
 
     if not student:
         await state.clear()
         return await message.answer(
-            f"❌ Номер {phone} не найден в базе.\n\n"
-            "Если вы студент ЧГУ — подайте заявку на вступление:",
+            f"❌ Номер {phone} не найден в базе.\n\nЕсли вы студент ЧГУ — подайте заявку:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📝 Подать заявку",      callback_data="request_registration")],
                 [InlineKeyboardButton(text="🔢 Войти по баркоду",   callback_data="auth_barcode")],
@@ -197,32 +142,35 @@ async def auth_phone_receive(message: Message, state: FSMContext):
             ])
         )
 
-    # Генерируем 6-значный код
-    code = str(random.randint(100000, 999999))
+    # Проверяем — не привязан ли уже к другому аккаунту
     user_id = message.from_user.id
+    if student.telegram_id and student.telegram_id != user_id:
+        await state.clear()
+        return await message.answer(
+            "⚠️ Этот номер уже привязан к другому аккаунту. Обратитесь в поддержку.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")]
+            ])
+        )
 
-    # Отправляем через NotiSend
-    await message.answer("⏳ Отправляем код подтверждения...")
+    code = str(random.randint(100000, 999999))
+    await message.answer("⏳ Отправляем код в Telegram...")
     result = await _send_otp(phone, code)
 
     if not _is_send_success(result):
-        error_msg = _get_send_error(result)
+        err = result.get("message", str(result)) if isinstance(result, dict) else str(result)
         return await message.answer(
-            f"❌ Не удалось отправить код: {error_msg}\n\n"
-            "Попробуйте войти по баркоду:",
+            f"❌ Не удалось отправить код: {err}\n\nПопробуйте войти по баркоду:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔢 Войти по баркоду", callback_data="auth_barcode")]
             ])
         )
 
-    # Сохраняем код в памяти
     _pending_codes[user_id] = {"code": code, "phone": phone, "student_id": student.id}
-
     await state.update_data(phone=phone, student_id=student.id)
     await state.set_state(PhoneAuthState.AWAITING_CODE)
     await message.answer(
-        f"✅ Код отправлен на номер {phone}!\n\n"
-        "Введите 6-значный код:",
+        f"✅ Код отправлен в Telegram на номер {phone}!\n\nВведите 6-значный код:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Отправить снова", callback_data="resend_code")],
             [InlineKeyboardButton(text="⬅️ Назад",           callback_data="back_to_start")],
@@ -234,27 +182,14 @@ async def auth_phone_receive(message: Message, state: FSMContext):
 async def resend_code(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     phone = data.get("phone")
-    if not phone:
-        return await callback.answer("Начните авторизацию заново", show_alert=True)
-
+    if not phone: return await callback.answer("Начните авторизацию заново", show_alert=True)
     user_id = callback.from_user.id
     code = str(random.randint(100000, 999999))
-    _pending_codes[user_id] = {**_pending_codes.get(user_id, {}), "code": code}
-
+    if user_id in _pending_codes:
+        _pending_codes[user_id]["code"] = code
     await callback.answer("⏳ Отправляем...")
-    result = await _send_otp(phone, code)
-
-    if _is_send_success(result):
-        await callback.message.answer("✅ Новый код отправлен! Введите его:")
-    else:
-        error_msg = _get_send_error(result)
-        await callback.message.answer(
-            f"❌ Не удалось отправить код повторно: {error_msg}\n\n"
-            "Попробуйте войти по баркоду:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔢 Войти по баркоду", callback_data="auth_barcode")]
-            ])
-        )
+    await _send_otp(phone, code)
+    await callback.message.answer("✅ Новый код отправлен! Введите его:")
 
 
 @router.message(PhoneAuthState.AWAITING_CODE)
@@ -274,7 +209,6 @@ async def auth_code_receive(message: Message, state: FSMContext):
             ])
         )
 
-    # Код верный — привязываем telegram_id
     student_id = pending["student_id"]
     _pending_codes.pop(user_id, None)
 
@@ -283,14 +217,6 @@ async def auth_code_receive(message: Message, state: FSMContext):
         if not student:
             await state.clear()
             return await message.answer("❌ Ошибка: студент не найден.")
-        if student.telegram_id and student.telegram_id != user_id:
-            await state.clear()
-            return await message.answer(
-                "⚠️ Этот номер уже привязан к другому аккаунту. Обратитесь в поддержку.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")]
-                ])
-            )
         student.telegram_id = user_id
         session.commit()
 
@@ -301,7 +227,7 @@ async def auth_code_receive(message: Message, state: FSMContext):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  АВТОРИЗАЦИЯ ПО БАРКОДУ
+#  АВТОРИЗАЦИЯ ПО БАРКОДУ — с защитой
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "auth_barcode")
@@ -309,7 +235,7 @@ async def auth_barcode_start(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(StudentVerificationState.AWAITING_BARCODE)
     await callback.message.answer(
-        "🔢 Введите ваш баркод (13 цифр):\n\nПример: 2004111111111",
+        "🔢 Введите ваш баркод (13 цифр):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
         ])
@@ -329,6 +255,7 @@ async def register_by_barcode(message: Message, state: FSMContext):
         return await message.answer("❗ Баркод должен содержать ровно 13 цифр")
 
     user_id = message.from_user.id
+
     with Session() as session:
         student = session.query(Student).filter_by(barcode=barcode).first()
         if not student:
@@ -339,16 +266,41 @@ async def register_by_barcode(message: Message, state: FSMContext):
                     [InlineKeyboardButton(text="📱 Войти по телефону", callback_data="auth_phone")],
                 ])
             )
+
+        # Уже привязан к другому — блокируем
         if student.telegram_id and student.telegram_id != user_id:
             return await message.answer(
-                "⚠️ Баркод уже привязан к другому аккаунту.",
+                "⚠️ Этот баркод уже привязан к другому аккаунту.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")]
                 ])
             )
-        if not student.telegram_id:
-            student.telegram_id = user_id
-            session.commit()
+
+        # Уже этот же пользователь — просто входим
+        if student.telegram_id == user_id:
+            await state.clear()
+            is_admin = user_id in ADMIN_IDS
+            await message.answer("✅ Ты уже зарегистрирован!")
+            return await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
+
+        # Новая привязка: если есть телефон — требуем подтверждение по телефону
+        if student.phone:
+            await state.clear()
+            return await message.answer(
+                f"🔐 *Для безопасности подтвердите личность*\n\n"
+                f"В базе есть ваш телефон. Пожалуйста, войдите через номер телефона — "
+                f"это гарантирует что вы владелец этого баркода.\n\n"
+                f"Нажмите кнопку ниже:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📱 Войти по телефону", callback_data="auth_phone")],
+                    [InlineKeyboardButton(text="⬅️ Назад",             callback_data="back_to_start")],
+                ])
+            )
+
+        # Нет телефона — привязываем баркод напрямую
+        student.telegram_id = user_id
+        session.commit()
 
     await state.clear()
     is_admin = user_id in ADMIN_IDS
@@ -366,7 +318,7 @@ async def start_reg_request(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RegistrationRequestState.AWAITING_FIO)
     await callback.message.answer(
         "📝 *Заявка на вступление в Профком ЧГУ*\n\n"
-        "Тогда напишите нам ваше:\n\n"
+        "Напишите нам ваше:\n\n"
         "*1. ФИО* (полностью, например: Иванов Иван Иванович):",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -378,19 +330,13 @@ async def start_reg_request(callback: CallbackQuery, state: FSMContext):
 @router.message(RegistrationRequestState.AWAITING_FIO)
 async def reg_request_fio(message: Message, state: FSMContext):
     await state.update_data(full_name=message.text.strip())
-    await message.answer(
-        "*2. Дата рождения* (например: 01.01.2000 или 01,01,2000):",
-        parse_mode="Markdown"
-    )
+    await message.answer("*2. Дата рождения* (например: 01.01.2000):", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_BIRTH_DATE)
 
 
 @router.message(RegistrationRequestState.AWAITING_BIRTH_DATE)
 async def reg_request_birth(message: Message, state: FSMContext):
-    # Нормализуем дату: запятые/дефисы/слеши → точки
-    raw_date = message.text.strip() if message.text else ""
-    normalized_date = _normalize_date(raw_date)
-    await state.update_data(birth_date=normalized_date)
+    await state.update_data(birth_date=message.text.strip())
     await message.answer("*3. Факультет / Институт:*", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_FACULTY)
 
@@ -406,45 +352,35 @@ async def reg_request_faculty(message: Message, state: FSMContext):
 async def reg_request_phone(message: Message, state: FSMContext, bot: Bot):
     raw = message.text.strip() if message.text else "нет"
     phone = _normalize_phone(raw) if raw.lower() != "нет" else None
-    data = await state.get_data()
-    user_id = message.from_user.id
+    data = await state.get_data(); user_id = message.from_user.id
 
     with Session() as session:
         req = RegistrationRequest(
-            telegram_id=user_id,
-            full_name=data["full_name"],
-            birth_date=data.get("birth_date"),
-            faculty=data["faculty"],
-            phone=phone,
-            status='pending'
+            telegram_id=user_id, full_name=data["full_name"],
+            birth_date=data.get("birth_date"), faculty=data["faculty"],
+            phone=phone, status='pending'
         )
-        session.add(req)
-        session.commit()
-        req_id = req.id
+        session.add(req); session.commit(); req_id = req.id
 
     await state.clear()
     await message.answer(
         "✅ *Заявка отправлена!*\n\n"
-        "Мы вас внесём в базу приложения и зарезервируем под вас баркод, "
-        "после чего сообщим цифры.\n\nОжидайте ответа администратора.",
+        "Мы вас внесём в базу приложения и зарезервируем баркод, "
+        "после чего сообщим цифры. Ожидайте ответа администратора.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💬 Написать вопрос", callback_data=f"reg_chat_{req_id}")]
         ])
     )
 
-    # Уведомляем модераторов
     from handlers.support import _get_mods
     with Session() as session:
         mods = _get_mods(session)
 
     notif = (
-        f"📋 *Новая заявка на регистрацию #{req_id}*\n\n"
-        f"👤 {data['full_name']}\n"
-        f"📅 Дата рождения: {data.get('birth_date', '—')}\n"
-        f"🏛 Факультет: {data['faculty']}\n"
-        f"📱 Телефон: {phone or '—'}\n"
-        f"🆔 Telegram ID: {user_id}"
+        f"📋 *Новая заявка #{req_id}*\n\n"
+        f"👤 {data['full_name']}\n📅 {data.get('birth_date','—')}\n"
+        f"🏛 {data['faculty']}\n📱 {phone or '—'}\n🆔 {user_id}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Открыть заявку", callback_data=f"view_reg_req_{req_id}")]
@@ -461,16 +397,12 @@ async def reg_chat_open(callback: CallbackQuery, state: FSMContext):
     from states import RegRequestReplyState
     await state.set_state(RegRequestReplyState.AWAITING_MESSAGE)
     await callback.message.answer(
-        "✏️ Напишите ваш вопрос или дополнение:",
+        "✏️ Напишите ваш вопрос:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_start")]
         ])
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  НАВИГАЦИЯ
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "back_to_start")
 async def back_to_start(callback: CallbackQuery, state: FSMContext):
@@ -478,21 +410,18 @@ async def back_to_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     with Session() as session:
         student = session.query(Student).filter_by(telegram_id=user_id).first()
-
     try: await callback.message.delete()
     except Exception: pass
-
     if student:
         is_admin = user_id in ADMIN_IDS
         return await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
-
     await callback.message.answer(
         "🚀 *Добро пожаловать в Профком ЧГУ!*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Войти по номеру телефона",  callback_data="auth_phone")],
-            [InlineKeyboardButton(text="🔢 Войти по баркоду",          callback_data="auth_barcode")],
-            [InlineKeyboardButton(text="📝 Подать заявку",             callback_data="request_registration")],
-            [InlineKeyboardButton(text="🆘 Поддержка",                 callback_data="support_unreg")],
+            [InlineKeyboardButton(text="📱 Войти по номеру телефона",   callback_data="auth_phone")],
+            [InlineKeyboardButton(text="🔢 Войти по баркоду",           callback_data="auth_barcode")],
+            [InlineKeyboardButton(text="📝 Подать заявку",              callback_data="request_registration")],
+            [InlineKeyboardButton(text="🆘 Поддержка",                  callback_data="support_unreg")],
         ])
     )
