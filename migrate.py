@@ -3,7 +3,10 @@ from sqlalchemy import text
 from database import engine
 
 migrations = [
-    # Существующие
+    # КРИТИЧНО: telegram_id должен быть BIGINT (Telegram ID > 2^31)
+    "ALTER TABLE students ALTER COLUMN telegram_id TYPE BIGINT;",
+
+    # Остальные миграции
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline TIMESTAMP;",
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;",
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS show_deadline BOOLEAN DEFAULT FALSE;",
@@ -26,7 +29,6 @@ migrations = [
     "ALTER TABLE event_merch ADD COLUMN IF NOT EXISTS custom_stock INTEGER;",
     "ALTER TABLE event_merch ADD COLUMN IF NOT EXISTS custom_price INTEGER;",
     "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS event_id INTEGER REFERENCES events(id);",
-    # Новые таблицы
     """CREATE TABLE IF NOT EXISTS event_participants (
         id SERIAL PRIMARY KEY, event_id INTEGER REFERENCES events(id),
         student_id INTEGER REFERENCES students(id), event_balance INTEGER DEFAULT 0,
@@ -46,29 +48,22 @@ migrations = [
         merch_id INTEGER REFERENCES merchandise(id), custom_stock INTEGER, custom_price INTEGER,
         UNIQUE(event_id, merch_id));""",
     """CREATE TABLE IF NOT EXISTS support_tickets (
-        id SERIAL PRIMARY KEY, student_telegram_id INTEGER NOT NULL,
-        moderator_telegram_id INTEGER, status VARCHAR(20) DEFAULT 'open',
+        id SERIAL PRIMARY KEY, student_telegram_id BIGINT NOT NULL,
+        moderator_telegram_id BIGINT, status VARCHAR(20) DEFAULT 'open',
         event_id INTEGER REFERENCES events(id), created_at TIMESTAMP DEFAULT NOW());""",
     """CREATE TABLE IF NOT EXISTS support_messages (
         id SERIAL PRIMARY KEY, ticket_id INTEGER REFERENCES support_tickets(id),
-        sender_id INTEGER NOT NULL, text TEXT, file_id VARCHAR(255),
+        sender_id BIGINT NOT NULL, text TEXT, file_id VARCHAR(255),
         file_type VARCHAR(20), sent_at TIMESTAMP DEFAULT NOW());""",
-    # Заявки на регистрацию
     """CREATE TABLE IF NOT EXISTS registration_requests (
-        id SERIAL PRIMARY KEY,
-        telegram_id INTEGER NOT NULL,
-        full_name VARCHAR(255) NOT NULL,
-        birth_date VARCHAR(50),
-        faculty VARCHAR(200) NOT NULL,
-        phone VARCHAR(20),
-        status VARCHAR(20) DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT NOW());""",
+        id SERIAL PRIMARY KEY, telegram_id BIGINT NOT NULL,
+        full_name VARCHAR(255) NOT NULL, birth_date VARCHAR(50),
+        faculty VARCHAR(200) NOT NULL, phone VARCHAR(20),
+        status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());""",
     """CREATE TABLE IF NOT EXISTS reg_request_messages (
-        id SERIAL PRIMARY KEY,
-        request_id INTEGER REFERENCES registration_requests(id),
-        sender_id INTEGER NOT NULL,
-        text TEXT, file_id VARCHAR(255), file_type VARCHAR(20),
-        sent_at TIMESTAMP DEFAULT NOW());""",
+        id SERIAL PRIMARY KEY, request_id INTEGER REFERENCES registration_requests(id),
+        sender_id BIGINT NOT NULL, text TEXT, file_id VARCHAR(255),
+        file_type VARCHAR(20), sent_at TIMESTAMP DEFAULT NOW());""",
 ]
 
 with engine.connect() as conn:
