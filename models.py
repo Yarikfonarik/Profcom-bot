@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, BigInteger, String, Text, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
@@ -11,8 +11,8 @@ class Student(Base):
     id = Column(Integer, primary_key=True)
     full_name = Column(String(255), nullable=False)
     barcode = Column(String(13), unique=True)
-    telegram_id = Column(Integer, unique=True)
-    phone = Column(String(20), nullable=True)          # номер телефона
+    telegram_id = Column(BigInteger, unique=True)   # BIGINT — Telegram ID > 2^31
+    phone = Column(String(20), nullable=True)
     faculty = Column(String(100))
     balance = Column(Integer, default=0)
     role = Column(String(20), default='student')
@@ -27,25 +27,23 @@ class Student(Base):
 
 
 class RegistrationRequest(Base):
-    """Заявка на регистрацию от нового студента."""
     __tablename__ = 'registration_requests'
     id = Column(Integer, primary_key=True)
-    telegram_id = Column(Integer, nullable=False)
+    telegram_id = Column(BigInteger, nullable=False)
     full_name = Column(String(255), nullable=False)
     birth_date = Column(String(50), nullable=True)
     faculty = Column(String(200), nullable=False)
     phone = Column(String(20), nullable=True)
-    status = Column(String(20), default='pending')  # pending / approved / rejected
+    status = Column(String(20), default='pending')
     created_at = Column(DateTime, default=datetime.utcnow)
     messages = relationship("RegRequestMessage", back_populates="request")
 
 
 class RegRequestMessage(Base):
-    """Сообщения в переписке по заявке."""
     __tablename__ = 'reg_request_messages'
     id = Column(Integer, primary_key=True)
     request_id = Column(Integer, ForeignKey('registration_requests.id'), nullable=False)
-    sender_id = Column(Integer, nullable=False)   # telegram_id отправителя
+    sender_id = Column(BigInteger, nullable=False)
     text = Column(Text, nullable=True)
     file_id = Column(String(255), nullable=True)
     file_type = Column(String(20), nullable=True)
@@ -194,8 +192,8 @@ class EventMerch(Base):
 class SupportTicket(Base):
     __tablename__ = 'support_tickets'
     id = Column(Integer, primary_key=True)
-    student_telegram_id = Column(Integer, nullable=False)
-    moderator_telegram_id = Column(Integer, nullable=True)
+    student_telegram_id = Column(BigInteger, nullable=False)
+    moderator_telegram_id = Column(BigInteger, nullable=True)
     status = Column(String(20), default='open')
     event_id = Column(Integer, ForeignKey('events.id'), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -206,7 +204,7 @@ class SupportMessage(Base):
     __tablename__ = 'support_messages'
     id = Column(Integer, primary_key=True)
     ticket_id = Column(Integer, ForeignKey('support_tickets.id'), nullable=False)
-    sender_id = Column(Integer, nullable=False)
+    sender_id = Column(BigInteger, nullable=False)
     text = Column(Text, nullable=True)
     file_id = Column(String(255), nullable=True)
     file_type = Column(String(20), nullable=True)
