@@ -1,8 +1,5 @@
 # handlers/registration.py
-import os
-import re
-import random
-import hashlib
+import os, re, random, hashlib
 import aiohttp
 
 from aiogram import Router, F, Bot
@@ -22,12 +19,11 @@ NOTISEND_PROJECT = os.environ.get("NOTISEND_PROJECT", "")
 NOTISEND_API_KEY  = os.environ.get("NOTISEND_API_KEY", "")
 NOTISEND_SENDER   = os.environ.get("NOTISEND_SENDER", "Profkom")
 
-# Временные коды {user_id: {"code": "...", "phone": "...", "student_id": int}}
 _pending_codes: dict[int, dict] = {}
 
 
 def _normalize_phone(raw: str) -> str:
-    digits = re.sub(r"\D", "", raw)
+    digits = re.sub(r"\D", "", str(raw))
     if digits.startswith("8") and len(digits) == 11:
         digits = "7" + digits[1:]
     if len(digits) == 10:
@@ -42,35 +38,39 @@ def _is_valid_phone(phone: str) -> bool:
 def _make_sign(params: dict, api_key: str) -> str:
     sorted_values = [str(v) for _, v in sorted(params.items())]
     step1 = ";".join(sorted_values) + ";" + api_key
-    step2 = hashlib.sha1(step1.encode("utf-8")).hexdigest()
-    return hashlib.md5(step2.encode("utf-8")).hexdigest()
+    step2 = hashlib.sha1(step1.encode()).hexdigest()
+    return hashlib.md5(step2.encode()).hexdigest()
 
 
 async def _send_otp(phone: str, code: str) -> dict:
     message_text = f"Ваш код подтверждения Профком ЧГУ: {code}"
-    phone_digits = phone.lstrip("+")
     params = {
         "message":    message_text,
         "project":    NOTISEND_PROJECT,
-        "recipients": phone_digits,
+        "recipients": phone.lstrip("+"),
         "sender":     NOTISEND_SENDER,
     }
-    sign = _make_sign(params, NOTISEND_API_KEY)
-    params["sign"] = sign
+    params["sign"] = _make_sign(params, NOTISEND_API_KEY)
     url = "https://sms.notisend.ru/api/message/send"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=params) as resp:
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, data=params) as resp:
             try: return await resp.json(content_type=None)
-            except Exception:
-                return {"status": "error", "message": await resp.text()}
+            except Exception: return {"status": "error", "message": await resp.text()}
 
 
-def _is_send_success(result) -> bool:
-    """NotiSend возвращает список при успехе или dict со status:success."""
+def _send_ok(result) -> bool:
     if isinstance(result, list): return True
-    if isinstance(result, dict):
-        return result.get("status") == "success"
+    if isinstance(result, dict): return result.get("status") == "success"
     return False
+
+
+def _start_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Войти по номеру телефона",   callback_data="auth_phone")],
+        [InlineKeyboardButton(text="🔢 Войти по баркоду",           callback_data="auth_barcode")],
+        [InlineKeyboardButton(text="📝 Подать заявку на вступление", callback_data="request_registration")],
+        [InlineKeyboardButton(text="🆘 Поддержка",                  callback_data="support_unreg")],
+    ])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,23 +87,15 @@ async def cmd_start(message: Message, state: FSMContext):
         student = session.query(Student).filter_by(telegram_id=user_id).first()
 
     if student:
-        is_admin = user_id in ADMIN_IDS
-        return await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
+        return await message.answer("🏠 Главное меню:",
+            reply_markup=main_menu_keyboard(user_id in ADMIN_IDS))
 
-    await message.answer(
-        "🚀 *Добро пожаловать в Профком ЧГУ!*\n\nВыберите действие:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Войти по номеру телефона",   callback_data="auth_phone")],
-            [InlineKeyboardButton(text="🔢 Войти по баркоду",           callback_data="auth_barcode")],
-            [InlineKeyboardButton(text="📝 Подать заявку на вступление", callback_data="request_registration")],
-            [InlineKeyboardButton(text="🆘 Поддержка",                  callback_data="support_unreg")],
-        ])
-    )
+    await message.answer("🚀 *Добро пожаловать в Профком ЧГУ!*\n\nВыберите действие:",
+        parse_mode="Markdown", reply_markup=_start_kb())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  АВТОРИЗАЦИЯ ПО ТЕЛЕФОНУ
+#  ВХОД ПО ТЕЛЕФОНУ
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "auth_phone")
@@ -122,11 +114,8 @@ async def auth_phone_start(callback: CallbackQuery, state: FSMContext):
 async def auth_phone_receive(message: Message, state: FSMContext):
     raw = message.text.strip() if message.text else ""
     phone = _normalize_phone(raw)
-
     if not _is_valid_phone(phone):
-        return await message.answer(
-            "❗ Неверный формат. Введите российский номер:\n+79001234567 или 89001234567"
-        )
+        return await message.answer("❗ Неверный формат. Пример: +79001234567 или 89001234567")
 
     with Session() as session:
         student = session.query(Student).filter_by(phone=phone).first()
@@ -134,7 +123,7 @@ async def auth_phone_receive(message: Message, state: FSMContext):
     if not student:
         await state.clear()
         return await message.answer(
-            f"❌ Номер {phone} не найден в базе.\n\nЕсли вы студент ЧГУ — подайте заявку:",
+            f"❌ Номер {phone} не найден в базе.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📝 Подать заявку",      callback_data="request_registration")],
                 [InlineKeyboardButton(text="🔢 Войти по баркоду",   callback_data="auth_barcode")],
@@ -142,12 +131,18 @@ async def auth_phone_receive(message: Message, state: FSMContext):
             ])
         )
 
-    # Проверяем — не привязан ли уже к другому аккаунту
     user_id = message.from_user.id
+    # Уже привязан к этому же аккаунту
+    if student.telegram_id == user_id:
+        await state.clear()
+        return await message.answer("✅ Ты уже авторизован!",
+            reply_markup=main_menu_keyboard(user_id in ADMIN_IDS))
+
+    # Привязан к другому — блокируем
     if student.telegram_id and student.telegram_id != user_id:
         await state.clear()
         return await message.answer(
-            "⚠️ Этот номер уже привязан к другому аккаунту. Обратитесь в поддержку.",
+            "⚠️ Этот номер уже привязан к другому аккаунту.\nОбратитесь в поддержку для отвязки.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")]
             ])
@@ -157,10 +152,10 @@ async def auth_phone_receive(message: Message, state: FSMContext):
     await message.answer("⏳ Отправляем код в Telegram...")
     result = await _send_otp(phone, code)
 
-    if not _is_send_success(result):
+    if not _send_ok(result):
         err = result.get("message", str(result)) if isinstance(result, dict) else str(result)
         return await message.answer(
-            f"❌ Не удалось отправить код: {err}\n\nПопробуйте войти по баркоду:",
+            f"❌ Не удалось отправить код: {err}\n\nВойдите по баркоду:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔢 Войти по баркоду", callback_data="auth_barcode")]
             ])
@@ -170,7 +165,7 @@ async def auth_phone_receive(message: Message, state: FSMContext):
     await state.update_data(phone=phone, student_id=student.id)
     await state.set_state(PhoneAuthState.AWAITING_CODE)
     await message.answer(
-        f"✅ Код отправлен в Telegram на номер {phone}!\n\nВведите 6-значный код:",
+        f"✅ Код отправлен на номер {phone}!\n\nВведите 6-значный код:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Отправить снова", callback_data="resend_code")],
             [InlineKeyboardButton(text="⬅️ Назад",           callback_data="back_to_start")],
@@ -182,14 +177,13 @@ async def auth_phone_receive(message: Message, state: FSMContext):
 async def resend_code(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     phone = data.get("phone")
-    if not phone: return await callback.answer("Начните авторизацию заново", show_alert=True)
-    user_id = callback.from_user.id
+    if not phone: return await callback.answer("Начните заново", show_alert=True)
     code = str(random.randint(100000, 999999))
-    if user_id in _pending_codes:
-        _pending_codes[user_id]["code"] = code
-    await callback.answer("⏳ Отправляем...")
+    uid = callback.from_user.id
+    if uid in _pending_codes: _pending_codes[uid]["code"] = code
+    await callback.answer("⏳")
     await _send_otp(phone, code)
-    await callback.message.answer("✅ Новый код отправлен! Введите его:")
+    await callback.message.answer("✅ Новый код отправлен!")
 
 
 @router.message(PhoneAuthState.AWAITING_CODE)
@@ -200,10 +194,9 @@ async def auth_code_receive(message: Message, state: FSMContext):
 
     user_id = message.from_user.id
     pending = _pending_codes.get(user_id)
-
     if not pending or pending["code"] != code_input:
         return await message.answer(
-            "❌ Неверный код. Попробуйте ещё раз или запросите новый.",
+            "❌ Неверный код.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Новый код", callback_data="resend_code")]
             ])
@@ -216,18 +209,17 @@ async def auth_code_receive(message: Message, state: FSMContext):
         student = session.query(Student).get(student_id)
         if not student:
             await state.clear()
-            return await message.answer("❌ Ошибка: студент не найден.")
+            return await message.answer("❌ Ошибка.")
         student.telegram_id = user_id
         session.commit()
 
     await state.clear()
-    is_admin = user_id in ADMIN_IDS
     await message.answer("✅ Авторизация прошла успешно!")
-    await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
+    await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(user_id in ADMIN_IDS))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  АВТОРИЗАЦИЯ ПО БАРКОДУ — с защитой
+#  ВХОД ПО БАРКОДУ — telegram_id привязывается навсегда, отвязать может только админ
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "auth_barcode")
@@ -252,10 +244,9 @@ async def handle_start_old(callback: CallbackQuery, state: FSMContext):
 async def register_by_barcode(message: Message, state: FSMContext):
     barcode = message.text.strip() if message.text else ""
     if not barcode.isdigit() or len(barcode) != 13:
-        return await message.answer("❗ Баркод должен содержать ровно 13 цифр")
+        return await message.answer("❗ Баркод — 13 цифр")
 
     user_id = message.from_user.id
-
     with Session() as session:
         student = session.query(Student).filter_by(barcode=barcode).first()
         if not student:
@@ -267,49 +258,33 @@ async def register_by_barcode(message: Message, state: FSMContext):
                 ])
             )
 
-        # Уже привязан к другому — блокируем
+        # Уже этот же пользователь
+        if student.telegram_id == user_id:
+            await state.clear()
+            return await message.answer("✅ Ты уже авторизован!",
+                reply_markup=main_menu_keyboard(user_id in ADMIN_IDS))
+
+        # Привязан к другому — запрещаем
         if student.telegram_id and student.telegram_id != user_id:
             return await message.answer(
-                "⚠️ Этот баркод уже привязан к другому аккаунту.",
+                "⚠️ Этот баркод уже привязан к другому аккаунту.\n\n"
+                "Если ты сменил аккаунт — обратись к администратору для отвязки.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_unreg")]
                 ])
             )
 
-        # Уже этот же пользователь — просто входим
-        if student.telegram_id == user_id:
-            await state.clear()
-            is_admin = user_id in ADMIN_IDS
-            await message.answer("✅ Ты уже зарегистрирован!")
-            return await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
-
-        # Новая привязка: если есть телефон — требуем подтверждение по телефону
-        if student.phone:
-            await state.clear()
-            return await message.answer(
-                f"🔐 *Для безопасности подтвердите личность*\n\n"
-                f"В базе есть ваш телефон. Пожалуйста, войдите через номер телефона — "
-                f"это гарантирует что вы владелец этого баркода.\n\n"
-                f"Нажмите кнопку ниже:",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📱 Войти по телефону", callback_data="auth_phone")],
-                    [InlineKeyboardButton(text="⬅️ Назад",             callback_data="back_to_start")],
-                ])
-            )
-
-        # Нет телефона — привязываем баркод напрямую
+        # Свободный баркод — привязываем
         student.telegram_id = user_id
         session.commit()
 
     await state.clear()
-    is_admin = user_id in ADMIN_IDS
-    await message.answer("✅ Готово! Ты успешно вошёл.")
-    await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
+    await message.answer("✅ Готово!")
+    await message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(user_id in ADMIN_IDS))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ЗАЯВКА НА ВСТУПЛЕНИЕ
+#  ЗАЯВКА НА ВСТУПЛЕНИЕ — только сбор данных для модерации
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "request_registration")
@@ -328,59 +303,68 @@ async def start_reg_request(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(RegistrationRequestState.AWAITING_FIO)
-async def reg_request_fio(message: Message, state: FSMContext):
+async def reg_fio(message: Message, state: FSMContext):
     await state.update_data(full_name=message.text.strip())
     await message.answer("*2. Дата рождения* (например: 01.01.2000):", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_BIRTH_DATE)
 
 
 @router.message(RegistrationRequestState.AWAITING_BIRTH_DATE)
-async def reg_request_birth(message: Message, state: FSMContext):
+async def reg_birth(message: Message, state: FSMContext):
     await state.update_data(birth_date=message.text.strip())
     await message.answer("*3. Факультет / Институт:*", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_FACULTY)
 
 
 @router.message(RegistrationRequestState.AWAITING_FACULTY)
-async def reg_request_faculty(message: Message, state: FSMContext):
+async def reg_faculty(message: Message, state: FSMContext):
     await state.update_data(faculty=message.text.strip())
     await message.answer("*4. Номер телефона* (или «нет»):", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_PHONE)
 
 
 @router.message(RegistrationRequestState.AWAITING_PHONE)
-async def reg_request_phone(message: Message, state: FSMContext, bot: Bot):
+async def reg_phone(message: Message, state: FSMContext, bot: Bot):
     raw = message.text.strip() if message.text else "нет"
     phone = _normalize_phone(raw) if raw.lower() != "нет" else None
-    data = await state.get_data(); user_id = message.from_user.id
+    data = await state.get_data()
+    user_id = message.from_user.id
 
     with Session() as session:
         req = RegistrationRequest(
-            telegram_id=user_id, full_name=data["full_name"],
-            birth_date=data.get("birth_date"), faculty=data["faculty"],
-            phone=phone, status='pending'
+            telegram_id=user_id,
+            full_name=data["full_name"],
+            birth_date=data.get("birth_date"),
+            faculty=data["faculty"],
+            phone=phone,
+            status='pending'
         )
-        session.add(req); session.commit(); req_id = req.id
+        session.add(req)
+        session.commit()
+        req_id = req.id
 
     await state.clear()
     await message.answer(
         "✅ *Заявка отправлена!*\n\n"
-        "Мы вас внесём в базу приложения и зарезервируем баркод, "
-        "после чего сообщим цифры. Ожидайте ответа администратора.",
+        "Мы внесём вас в базу и зарезервируем баркод — после чего свяжемся с вами здесь.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💬 Написать вопрос", callback_data=f"reg_chat_{req_id}")]
         ])
     )
 
+    # Уведомление модераторам
     from handlers.support import _get_mods
     with Session() as session:
         mods = _get_mods(session)
 
     notif = (
         f"📋 *Новая заявка #{req_id}*\n\n"
-        f"👤 {data['full_name']}\n📅 {data.get('birth_date','—')}\n"
-        f"🏛 {data['faculty']}\n📱 {phone or '—'}\n🆔 {user_id}"
+        f"👤 {data['full_name']}\n"
+        f"📅 {data.get('birth_date','—')}\n"
+        f"🏛 {data['faculty']}\n"
+        f"📱 {phone or '—'}\n"
+        f"🆔 TG: {user_id}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Открыть заявку", callback_data=f"view_reg_req_{req_id}")]
@@ -397,7 +381,7 @@ async def reg_chat_open(callback: CallbackQuery, state: FSMContext):
     from states import RegRequestReplyState
     await state.set_state(RegRequestReplyState.AWAITING_MESSAGE)
     await callback.message.answer(
-        "✏️ Напишите ваш вопрос:",
+        "✏️ Напишите вопрос или дополнение к заявке:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_start")]
         ])
@@ -413,15 +397,7 @@ async def back_to_start(callback: CallbackQuery, state: FSMContext):
     try: await callback.message.delete()
     except Exception: pass
     if student:
-        is_admin = user_id in ADMIN_IDS
-        return await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu_keyboard(is_admin))
-    await callback.message.answer(
-        "🚀 *Добро пожаловать в Профком ЧГУ!*",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Войти по номеру телефона",   callback_data="auth_phone")],
-            [InlineKeyboardButton(text="🔢 Войти по баркоду",           callback_data="auth_barcode")],
-            [InlineKeyboardButton(text="📝 Подать заявку",              callback_data="request_registration")],
-            [InlineKeyboardButton(text="🆘 Поддержка",                  callback_data="support_unreg")],
-        ])
-    )
+        return await callback.message.answer("🏠 Главное меню:",
+            reply_markup=main_menu_keyboard(user_id in ADMIN_IDS))
+    await callback.message.answer("🚀 *Добро пожаловать в Профком ЧГУ!*",
+        parse_mode="Markdown", reply_markup=_start_kb())
