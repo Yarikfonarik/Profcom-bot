@@ -32,7 +32,7 @@ async def cmd_menu(message: Message, state: FSMContext):
 
 
 @router.message(Command("profile"))
-async def cmd_profile(message: Message, bot):
+async def cmd_profile(message: Message):
     from handlers.statistics import _send_profile_with_qr
     await _send_profile_with_qr(message, message.from_user.id)
 
@@ -54,7 +54,6 @@ async def cmd_shop(message: Message, state: FSMContext):
 @router.message(Command("events"))
 async def cmd_events(message: Message, state: FSMContext):
     await state.clear()
-
     class FakeCb:
         from_user = message.from_user
         class _msg:
@@ -62,7 +61,6 @@ async def cmd_events(message: Message, state: FSMContext):
             async def delete(self): pass
         message = _msg()
         async def answer(self, *a, **kw): pass
-
     from handlers.events import events_menu
     await events_menu(FakeCb())
 
@@ -94,20 +92,37 @@ async def admin_panel(callback: CallbackQuery):
     await callback.message.answer(
         "👨‍💼 Админ панель:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👥 Студенты",            callback_data="students")],
-            [InlineKeyboardButton(text="📊 Статистика системы",  callback_data="stats")],
-            [InlineKeyboardButton(text="📤 Мероприятия",         callback_data="menu_events")],
-            [InlineKeyboardButton(text="📑 Модерация заданий",   callback_data="menu_moderation")],
-            [InlineKeyboardButton(text="📝 Статистика заданий",  callback_data="task_stats_menu")],
-            [InlineKeyboardButton(text="🛍 Статистика магазина", callback_data="shop_stats_menu")],
-            [InlineKeyboardButton(text="🆘 Обращения",           callback_data="support_admin")],
+            [InlineKeyboardButton(text="👥 Студенты",              callback_data="students")],
+            [InlineKeyboardButton(text="📊 Статистика",            callback_data="stats_menu")],
+            [InlineKeyboardButton(text="📑 Модерация заданий",     callback_data="menu_moderation")],
+            [InlineKeyboardButton(text="🆘 Обращения",             callback_data="support_admin")],
             [InlineKeyboardButton(text="📋 Заявки на регистрацию", callback_data="reg_requests_admin")],
-            [InlineKeyboardButton(text="🔁 Сбросить данные",     callback_data="reset_menu")],
-            [InlineKeyboardButton(text="⬅️ Главное меню",        callback_data="menu_back")],
+            [InlineKeyboardButton(text="📢 Новости / Рассылка",    callback_data="news_menu")],
+            [InlineKeyboardButton(text="🔁 Сбросить данные",       callback_data="reset_menu")],
+            [InlineKeyboardButton(text="⬅️ Главное меню",          callback_data="menu_back")],
         ])
     )
 
 
+# ── Статистика (единый раздел) ────────────────────────────────────────────────
+@router.callback_query(F.data == "stats_menu")
+async def stats_menu(callback: CallbackQuery):
+    if not is_mod(callback.from_user.id): return await callback.answer("⛔ Нет прав", show_alert=True)
+    try: await callback.message.delete()
+    except Exception: pass
+    await callback.message.answer(
+        "📊 Статистика:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Общая статистика системы", callback_data="stats")],
+            [InlineKeyboardButton(text="📝 Статистика заданий",       callback_data="task_stats_menu")],
+            [InlineKeyboardButton(text="🛍 Статистика магазина",      callback_data="shop_stats_menu")],
+            [InlineKeyboardButton(text="🎪 Статистика мероприятий",   callback_data="events_stats_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад",                   callback_data="admin_panel")],
+        ])
+    )
+
+
+# ── Сброс данных ──────────────────────────────────────────────────────────────
 @router.callback_query(F.data == "reset_menu")
 async def reset_menu(callback: CallbackQuery):
     if not is_mod(callback.from_user.id): return await callback.answer("⛔ Нет прав", show_alert=True)
@@ -144,7 +159,7 @@ async def do_reset_balances(callback: CallbackQuery):
         s.execute(text("UPDATE students SET balance = 0"))
         s.execute(text("UPDATE event_participants SET event_balance = 0"))
         s.commit()
-    await callback.answer("✅ Все баллы сброшены!", show_alert=True)
+    await callback.answer("✅ Сброшено!", show_alert=True)
     try: await callback.message.delete()
     except Exception: pass
     await admin_panel(callback)
@@ -161,7 +176,7 @@ async def do_reset_tasks(callback: CallbackQuery):
         s.execute(text("DELETE FROM task_verifications"))
         s.execute(text("UPDATE tasks SET is_deleted = TRUE"))
         s.commit()
-    await callback.answer("✅ Задания сброшены!", show_alert=True)
+    await callback.answer("✅ Сброшено!", show_alert=True)
     try: await callback.message.delete()
     except Exception: pass
     await admin_panel(callback)
@@ -178,7 +193,7 @@ async def do_reset_shop(callback: CallbackQuery):
         s.execute(text("DELETE FROM purchases"))
         s.execute(text("UPDATE merchandise SET is_deleted = TRUE, stock = 0"))
         s.commit()
-    await callback.answer("✅ Магазин сброшен!", show_alert=True)
+    await callback.answer("✅ Сброшено!", show_alert=True)
     try: await callback.message.delete()
     except Exception: pass
     await admin_panel(callback)
@@ -195,7 +210,7 @@ async def do_reset_events(callback: CallbackQuery):
         s.execute(text("UPDATE events SET status = 'closed' WHERE status = 'active'"))
         s.execute(text("UPDATE event_participants SET event_balance = 0"))
         s.commit()
-    await callback.answer("✅ Мероприятия сброшены!", show_alert=True)
+    await callback.answer("✅ Сброшено!", show_alert=True)
     try: await callback.message.delete()
     except Exception: pass
     await admin_panel(callback)
