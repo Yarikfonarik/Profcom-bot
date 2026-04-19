@@ -8,6 +8,7 @@ from aiogram.types import (
     CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 )
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from sqlalchemy import text
 
 from models import Student
@@ -18,21 +19,27 @@ from config import ADMIN_IDS
 router = Router()
 
 
+class AddStudentState(StatesGroup):
+    AWAITING_FIO = State()
+    AWAITING_FACULTY = State()
+    AWAITING_BARCODE = State()
+    AWAITING_PHONE = State()
+
+
 def _normalize_phone(raw: str) -> str | None:
-    """Нормализует телефон в формат +7XXXXXXXXXX."""
     if not raw or str(raw).strip().lower() in ("nan", "", "-", "нет"):
         return None
     digits = re.sub(r"\D", "", str(raw))
-    if not digits:
-        return None
-    if digits.startswith("8") and len(digits) == 11:
-        digits = "7" + digits[1:]
-    if len(digits) == 10:
-        digits = "7" + digits
-    if digits.startswith("7") and len(digits) == 11:
-        return "+" + digits
+    if not digits: return None
+    if digits.startswith("8") and len(digits) == 11: digits = "7" + digits[1:]
+    if len(digits) == 10: digits = "7" + digits
+    if digits.startswith("7") and len(digits) == 11: return "+" + digits
     return None
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ПАНЕЛЬ СТУДЕНТОВ
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "students")
 async def open_student_panel(callback: CallbackQuery):
@@ -43,12 +50,100 @@ async def open_student_panel(callback: CallbackQuery):
     await callback.message.answer(
         "👥 Панель студентов:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Найти студента",  callback_data="find_student")],
-            [InlineKeyboardButton(text="📥 Импорт из Excel", callback_data="import_students")],
-            [InlineKeyboardButton(text="⬅️ Назад",          callback_data="admin_panel")],
+            [InlineKeyboardButton(text="🔍 Найти студента",    callback_data="find_student")],
+            [InlineKeyboardButton(text="➕ Добавить студента",  callback_data="add_student_start")],
+            [InlineKeyboardButton(text="📥 Импорт из Excel",   callback_data="import_students")],
+            [InlineKeyboardButton(text="⬅️ Назад",            callback_data="admin_panel")],
         ])
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ДОБАВЛЕНИЕ ОДНОГО СТУДЕНТА
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "add_student_start")
+async def add_student_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
+    await state.clear()
+    await state.set_state(AddStudentState.AWAITING_FIO)
+    await callback.message.answer(
+        "➕ *Добавление студента*\n\n*1. ФИО* (полностью):",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="students")]
+        ])
+    )
+
+
+@router.message(AddStudentState.AWAITING_FIO)
+async def add_student_fio(message: Message, state: FSMContext):
+    await state.update_data(full_name=message.text.strip())
+    await message.answer("*2. Факультет / Институт:*", parse_mode="Markdown")
+    await state.set_state(AddStudentState.AWAITING_FACULTY)
+
+
+@router.message(AddStudentState.AWAITING_FACULTY)
+async def add_student_faculty(message: Message, state: FSMContext):
+    await state.update_data(faculty=message.text.strip())
+    await message.answer("*3. Баркод* (13 цифр):", parse_mode="Markdown")
+    await state.set_state(AddStudentState.AWAITING_BARCODE)
+
+
+@router.message(AddStudentState.AWAITING_BARCODE)
+async def add_student_barcode(message: Message, state: FSMContext):
+    barcode = message.text.strip()
+    if not barcode.isdigit() or len(barcode) != 13:
+        return await message.answer("❗ Баркод — 13 цифр. Повторите:")
+    # Проверяем уникальность
+    with Session() as session:
+        existing = session.query(Student).filter_by(barcode=barcode).first()
+    if existing:
+        return await message.answer(f"❌ Баркод {barcode} уже занят ({existing.full_name}). Введите другой:")
+    await state.update_data(barcode=barcode)
+    await message.answer(
+        "*4. Телефон* (или «нет»):", parse_mode="Markdown"
+    )
+    await state.set_state(AddStudentState.AWAITING_PHONE)
+
+
+@router.message(AddStudentState.AWAITING_PHONE)
+async def add_student_phone(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    phone = _normalize_phone(raw) if raw.lower() != "нет" else None
+    data = await state.get_data()
+
+    with Session() as session:
+        student = Student(
+            full_name=data["full_name"],
+            faculty=data["faculty"],
+            barcode=data["barcode"],
+            phone=phone,
+            status='active'
+        )
+        session.add(student)
+        session.commit()
+        sid = student.id
+
+    await state.clear()
+    await message.answer(
+        f"✅ *Студент добавлен!*\n\n"
+        f"👤 {data['full_name']}\n"
+        f"🏛 {data['faculty']}\n"
+        f"🔢 {data['barcode']}\n"
+        f"📱 {phone or '—'}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👤 Открыть карточку", callback_data=f"stucard_{sid}")],
+            [InlineKeyboardButton(text="➕ Добавить ещё",     callback_data="add_student_start")],
+            [InlineKeyboardButton(text="⬅️ Назад",           callback_data="students")],
+        ])
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ПОИСК
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "find_student")
 async def prompt_search(callback: CallbackQuery, state: FSMContext):
@@ -82,13 +177,16 @@ async def search_student(message: Message, state: FSMContext):
     await message.answer(f"📋 {count_txt}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  КАРТОЧКА СТУДЕНТА
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("stucard_"))
 async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot):
     student_id = int(callback.data.split("_")[1])
     with Session() as session:
         s = session.query(Student).get(student_id)
         if not s: return await callback.answer("Студент не найден", show_alert=True)
-
         role_icon = {"student": "🎓", "moderator": "🛡", "admin": "👑"}.get(s.role, "🎓")
         tg = str(s.telegram_id) if s.telegram_id else "не привязан"
         caption = (
@@ -105,29 +203,28 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
         current_role = s.role; current_status = s.status
 
     await state.update_data(student_id=student_id)
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💰 Баллы",       callback_data=f"sf_{student_id}_balance"),
-            InlineKeyboardButton(text="🔄 Сбросить",    callback_data=f"sreset_{student_id}"),
+            InlineKeyboardButton(text="💰 Баллы",      callback_data=f"sf_{student_id}_balance"),
+            InlineKeyboardButton(text="🔄 Сбросить",   callback_data=f"sreset_{student_id}"),
         ],
         [
-            InlineKeyboardButton(text="🏛 Факультет",   callback_data=f"sf_{student_id}_faculty"),
-            InlineKeyboardButton(text="📝 ФИО",         callback_data=f"sf_{student_id}_full_name"),
+            InlineKeyboardButton(text="🏛 Факультет",  callback_data=f"sf_{student_id}_faculty"),
+            InlineKeyboardButton(text="📝 ФИО",        callback_data=f"sf_{student_id}_full_name"),
         ],
         [
-            InlineKeyboardButton(text=f"{'✅ ' if current_role=='student' else ''}🎓 Студент",      callback_data=f"set_role_{student_id}_student"),
-            InlineKeyboardButton(text=f"{'✅ ' if current_role=='moderator' else ''}🛡 Модератор",  callback_data=f"set_role_{student_id}_moderator"),
-            InlineKeyboardButton(text=f"{'✅ ' if current_role=='admin' else ''}👑 Админ",          callback_data=f"set_role_{student_id}_admin"),
+            InlineKeyboardButton(text=f"{'✅ ' if current_role=='student' else ''}🎓",    callback_data=f"set_role_{student_id}_student"),
+            InlineKeyboardButton(text=f"{'✅ ' if current_role=='moderator' else ''}🛡",  callback_data=f"set_role_{student_id}_moderator"),
+            InlineKeyboardButton(text=f"{'✅ ' if current_role=='admin' else ''}👑",       callback_data=f"set_role_{student_id}_admin"),
         ],
         [
             InlineKeyboardButton(text=f"{'✅ ' if current_status=='active' else ''}Активен",       callback_data=f"set_status_{student_id}_active"),
             InlineKeyboardButton(text=f"{'✅ ' if current_status=='blocked' else ''}Заблокирован", callback_data=f"set_status_{student_id}_blocked"),
         ],
-        [InlineKeyboardButton(text="🔄 Обновить QR",    callback_data=f"admin_refresh_qr_{student_id}")],
         [InlineKeyboardButton(text="📱 Изм. телефон",  callback_data=f"sf_{student_id}_phone")],
         [InlineKeyboardButton(text="🔓 Отвязать TG",   callback_data=f"unlink_tg_{student_id}")],
-        [InlineKeyboardButton(text="💬 Написать",       callback_data=f"smsg_{student_id}")],
+        [InlineKeyboardButton(text="🔄 Обновить QR",   callback_data=f"admin_refresh_qr_{student_id}")],
+        [InlineKeyboardButton(text="💬 Написать",      callback_data=f"smsg_{student_id}")],
         [
             InlineKeyboardButton(text="🔍 Найти ещё",   callback_data="find_student"),
             InlineKeyboardButton(text="🏠 Админ панель", callback_data="admin_panel"),
@@ -161,6 +258,46 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
     await callback.message.answer(caption, reply_markup=kb)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  ОТВЯЗКА TELEGRAM
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("unlink_tg_"))
+async def unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
+    student_id = int(callback.data.split("_")[2])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if not s: return await callback.answer("Не найден")
+        name = s.full_name
+    await callback.message.answer(
+        f"⚠️ Отвязать Telegram от *{name}*?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да", callback_data=f"do_unlink_tg_{student_id}"),
+            InlineKeyboardButton(text="❌ Нет", callback_data=f"stucard_{student_id}"),
+        ]])
+    )
+
+
+@router.callback_query(F.data.startswith("do_unlink_tg_"))
+async def do_unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
+    student_id = int(callback.data.split("_")[3])
+    with Session() as session:
+        s = session.query(Student).get(student_id)
+        if s: s.telegram_id = None; s.qr_file_id = None; session.commit()
+    await callback.answer("✅ Отвязан")
+    try: await callback.message.delete()
+    except Exception: pass
+    callback.data = f"stucard_{student_id}"
+    await show_student_card(callback, state, bot)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  РОЛЬ / СТАТУС
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("set_role_"))
 async def confirm_role(callback: CallbackQuery):
     _, _, student_id, new_role = callback.data.split("_", 3)
@@ -170,7 +307,7 @@ async def confirm_role(callback: CallbackQuery):
         if not s: return await callback.answer("Не найден")
         current = s.role; name = s.full_name
     role_names = {"student": "🎓 Студент", "moderator": "🛡 Модератор", "admin": "👑 Админ"}
-    if current == new_role: return await callback.answer("Роль уже такая", show_alert=True)
+    if current == new_role: return await callback.answer("Уже такая", show_alert=True)
     await callback.message.answer(
         f"*{name}*\nСейчас: {role_names.get(current)}\nСменить на: {role_names.get(new_role)}?",
         parse_mode="Markdown",
@@ -203,7 +340,7 @@ async def confirm_status(callback: CallbackQuery):
         s = session.query(Student).get(student_id)
         if not s: return await callback.answer("Не найден")
         current = s.status; name = s.full_name
-    if current == new_status: return await callback.answer("Статус уже такой", show_alert=True)
+    if current == new_status: return await callback.answer("Уже такой", show_alert=True)
     status_names = {"active": "✅ Активен", "blocked": "⛔ Заблокирован"}
     await callback.message.answer(
         f"*{name}*\nСейчас: {status_names.get(current)}\nСменить на: {status_names.get(new_status)}?",
@@ -240,7 +377,7 @@ async def quick_edit_field(callback: CallbackQuery, state: FSMContext):
         "balance":   f"💰 Сейчас: {current}\nВведите баллы (500, +100, -50):",
         "faculty":   f"🏛 Сейчас: {current}\nВведите факультет:",
         "full_name": f"📝 Сейчас: {current}\nВведите ФИО:",
-        "phone":     f"📱 Сейчас: {current}\nВведите номер телефона (+79001234567):",
+        "phone":     f"📱 Сейчас: {current}\nВведите телефон (+79001234567):",
     }
     await state.update_data(student_id=student_id, field=field)
     await state.set_state(StudentEditState.AWAITING_VALUE)
@@ -265,12 +402,13 @@ async def save_student_field(message: Message, state: FSMContext, bot: Bot):
                 elif value.startswith("-"): s.balance -= int(value[1:])
                 else: s.balance = int(value)
             except ValueError: return await message.answer("❗ Введите число")
+        elif field == "phone":
+            s.phone = _normalize_phone(value)
         else:
             setattr(s, field, value)
         session.commit()
     await state.clear()
     await message.answer("✅ Сохранено!")
-
     class FakeCb:
         data = f"stucard_{student_id}"
         from_user = message.from_user
@@ -280,7 +418,6 @@ async def save_student_field(message: Message, state: FSMContext, bot: Bot):
             answer_photo = message.answer_photo
         message = _msg()
         async def answer(self, *a, **kw): pass
-
     await show_student_card(FakeCb(), state, bot)
 
 
@@ -291,8 +428,7 @@ async def reset_one_balance(callback: CallbackQuery, state: FSMContext, bot: Bot
         s = session.query(Student).get(student_id)
         name = s.full_name if s else "?"
     await callback.message.answer(
-        f"⚠️ Сбросить баллы *{name}*?",
-        parse_mode="Markdown",
+        f"⚠️ Сбросить баллы *{name}*?", parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Да", callback_data=f"do_sreset_{student_id}"),
             InlineKeyboardButton(text="❌ Нет", callback_data=f"stucard_{student_id}"),
@@ -306,47 +442,12 @@ async def do_reset_one(callback: CallbackQuery, state: FSMContext, bot: Bot):
     with Session() as session:
         s = session.query(Student).get(student_id)
         if s: s.balance = 0; session.commit()
-    await callback.answer("✅ Баллы сброшены")
+    await callback.answer("✅ Сброшено")
     try: await callback.message.delete()
     except Exception: pass
     callback.data = f"stucard_{student_id}"
     await show_student_card(callback, state, bot)
 
-
-
-@router.callback_query(F.data.startswith("unlink_tg_"))
-async def unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    student_id = int(callback.data.split("_")[2])
-    with Session() as session:
-        s = session.query(Student).get(student_id)
-        if not s: return await callback.answer("Не найден")
-        name = s.full_name
-    await callback.message.answer(
-        f"⚠️ Отвязать Telegram от *{name}*?\n\nПосле отвязки студент сможет привязать новый аккаунт.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Да, отвязать", callback_data=f"do_unlink_tg_{student_id}"),
-            InlineKeyboardButton(text="❌ Нет",          callback_data=f"stucard_{student_id}"),
-        ]])
-    )
-
-
-@router.callback_query(F.data.startswith("do_unlink_tg_"))
-async def do_unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    student_id = int(callback.data.split("_")[3])
-    with Session() as session:
-        s = session.query(Student).get(student_id)
-        if s:
-            s.telegram_id = None
-            s.qr_file_id = None
-            session.commit()
-    await callback.answer("✅ Telegram отвязан")
-    try: await callback.message.delete()
-    except Exception: pass
-    callback.data = f"stucard_{student_id}"
-    await show_student_card(callback, state, bot)
 
 @router.callback_query(F.data.startswith("admin_refresh_qr_"))
 async def admin_refresh_qr(callback: CallbackQuery, state: FSMContext, bot: Bot):
@@ -366,7 +467,7 @@ async def msg_student_prompt(callback: CallbackQuery, state: FSMContext):
     await state.update_data(msg_student_id=student_id)
     await state.set_state(AdminMsgState.AWAITING_MESSAGE)
     await callback.message.answer(
-        "💬 Введите сообщение:",
+        "💬 Введите сообщение (текст или фото):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data=f"stucard_{student_id}")]
         ])
@@ -383,9 +484,7 @@ async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
         target_id = s.telegram_id; student_name = s.full_name
     mod_name = message.from_user.full_name or "Администрация"
     header = f"📩 *Сообщение от администрации ({mod_name}):*\n\n"
-    reply_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Ответить", callback_data="support")]
-    ])
+    reply_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ Ответить", callback_data="support")]])
     try:
         if message.text:
             await bot.send_message(target_id, header + message.text, parse_mode="Markdown", reply_markup=reply_kb)
@@ -397,19 +496,16 @@ async def send_msg_to_student(message: Message, state: FSMContext, bot: Bot):
         await message.answer(f"❌ Ошибка: {e}")
 
 
-# ── Импорт из Excel ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  БЫСТРЫЙ ИМПОРТ ИЗ EXCEL (оптимизирован — bulk insert)
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "import_students")
 async def import_students_prompt(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав")
     await callback.message.answer(
         "📥 Отправьте .xlsx файл.\n\n"
-        "Ожидаемые колонки:\n"
-        "• Фамилия, Имя, Отчество\n"
-        "• Факультет/Институт\n"
-        "• Телефон/Логин (или «Телефон»)\n"
-        "• barcode\n"
-        "• Статус"
+        "Колонки: Фамилия, Имя, Отчество, Факультет/Институт, Телефон/Логин, barcode, Статус"
     )
     await state.set_state(ImportState.AWAITING_FILE)
 
@@ -420,68 +516,88 @@ async def process_import_excel(message: Message, state: FSMContext, bot: Bot):
     if not message.document.file_name.endswith(".xlsx"):
         return await message.answer("❗ Только .xlsx")
 
-    await message.answer("⏳ Обрабатываю...")
+    await message.answer("⏳ Загружаю файл...")
     try:
         file = await bot.get_file(message.document.file_id)
         fb = await bot.download_file(file.file_path)
         df = pd.read_excel(io.BytesIO(fb.read()), dtype=str)
         df.columns = df.columns.str.strip()
-
-        # Находим колонку с телефоном — может называться по-разному
-        phone_col = None
-        for col in df.columns:
-            if "телефон" in col.lower() or "логин" in col.lower() or "phone" in col.lower():
-                phone_col = col
-                break
-
-        added = updated = errors = 0
-        with Session() as session:
-            for _, row in df.iterrows():
-                try:
-                    barcode = str(row.get("barcode", "") or "").strip()
-                    if not barcode or barcode == "nan": continue
-
-                    parts = [str(row.get(c, "") or "").strip() for c in ("Фамилия", "Имя", "Отчество")]
-                    full_name = " ".join(p for p in parts if p and p != "nan")
-
-                    faculty = str(row.get("Факультет/Институт", "") or "").strip()
-                    if faculty == "nan": faculty = ""
-
-                    status = str(row.get("Статус", "active") or "active").strip()
-                    if status not in ("active", "blocked"): status = "active"
-
-                    # Телефон
-                    phone = None
-                    if phone_col:
-                        raw_phone = str(row.get(phone_col, "") or "").strip()
-                        phone = _normalize_phone(raw_phone)
-
-                    existing = session.query(Student).filter_by(barcode=barcode).first()
-                    if existing:
-                        existing.full_name = full_name
-                        existing.faculty = faculty
-                        existing.status = status
-                        if phone: existing.phone = phone  # обновляем телефон
-                        updated += 1
-                    else:
-                        session.add(Student(
-                            full_name=full_name, barcode=barcode,
-                            faculty=faculty, status=status, phone=phone
-                        ))
-                        added += 1
-                except Exception as ex:
-                    errors += 1
-
-            session.commit()
-
-        await state.clear()
-        await message.answer(
-            f"✅ Готово!\n"
-            f"➕ Добавлено: {added}\n"
-            f"🔄 Обновлено: {updated}\n"
-            f"❌ Ошибок: {errors}\n"
-            f"📱 Колонка телефонов: {phone_col or 'не найдена'}"
-        )
     except Exception as e:
         await state.clear()
-        await message.answer(f"❌ Ошибка: {e}")
+        return await message.answer(f"❌ Ошибка чтения файла: {e}")
+
+    # Находим колонку телефона
+    phone_col = next((c for c in df.columns if "телефон" in c.lower() or "логин" in c.lower()), None)
+
+    await message.answer(f"⚙️ Обрабатываю {len(df)} строк...")
+
+    # Загружаем все существующие баркоды одним запросом
+    with Session() as session:
+        existing_barcodes = {row[0]: row[1] for row in session.execute(
+            text("SELECT barcode, id FROM students WHERE barcode IS NOT NULL")
+        ).fetchall()}
+
+    to_insert = []
+    to_update = []
+
+    for _, row in df.iterrows():
+        try:
+            barcode = str(row.get("barcode", "") or "").strip()
+            if not barcode or barcode == "nan": continue
+
+            parts = [str(row.get(c, "") or "").strip() for c in ("Фамилия", "Имя", "Отчество")]
+            full_name = " ".join(p for p in parts if p and p != "nan")
+            if not full_name: continue
+
+            faculty = str(row.get("Факультет/Институт", "") or "").strip()
+            if faculty == "nan": faculty = ""
+
+            status = str(row.get("Статус", "active") or "active").strip()
+            if status not in ("active", "blocked"): status = "active"
+
+            phone = _normalize_phone(str(row.get(phone_col, "") or "")) if phone_col else None
+
+            if barcode in existing_barcodes:
+                to_update.append({
+                    "id": existing_barcodes[barcode],
+                    "full_name": full_name, "faculty": faculty,
+                    "status": status, "phone": phone
+                })
+            else:
+                to_insert.append({
+                    "full_name": full_name, "barcode": barcode,
+                    "faculty": faculty, "status": status,
+                    "phone": phone, "balance": 0, "role": "student"
+                })
+        except Exception:
+            continue
+
+    # Bulk операции
+    with Session() as session:
+        if to_insert:
+            session.execute(text("""
+                INSERT INTO students (full_name, barcode, faculty, status, phone, balance, role)
+                VALUES (:full_name, :barcode, :faculty, :status, :phone, :balance, :role)
+                ON CONFLICT (barcode) DO NOTHING
+            """), to_insert)
+
+        if to_update:
+            session.execute(text("""
+                UPDATE students SET
+                    full_name = :full_name,
+                    faculty = :faculty,
+                    status = :status,
+                    phone = COALESCE(:phone, phone)
+                WHERE id = :id
+            """), to_update)
+
+        session.commit()
+
+    await state.clear()
+    await message.answer(
+        f"✅ *Импорт завершён!*\n\n"
+        f"➕ Добавлено: {len(to_insert)}\n"
+        f"🔄 Обновлено: {len(to_update)}\n"
+        f"📱 Колонка телефонов: {phone_col or 'не найдена'}",
+        parse_mode="Markdown"
+    )
