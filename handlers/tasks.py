@@ -191,7 +191,7 @@ async def receive_answer(message: Message, state: FSMContext):
 
 
 @router.message(TaskState.waiting_proof)
-async def receive_proof(message: Message, state: FSMContext):
+async def receive_proof(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     task_id = data.get("task_id")
     if not task_id: await state.clear(); return await message.answer("❗ Начни заново.")
@@ -220,8 +220,32 @@ async def receive_proof(message: Message, state: FSMContext):
             proof_type=proof_type, status="pending"
         ))
         session.commit()
+
+        # Собираем данные для уведомления пока сессия открыта
+        task = session.query(Task).get(task_id)
+        student_name = student.full_name
+        task_title = task.title
+        from handlers.support import _get_mods
+        mods = _get_mods(session)
+
     await state.clear()
     await message.answer("📨 Отправлено на проверку.", reply_markup=main_menu_keyboard(user_id in ADMIN_IDS))
+
+    # Уведомляем модераторов о новой задаче на проверке
+    for mod_id, _ in mods:
+        try:
+            await bot.send_message(
+                mod_id,
+                f"📋 *Новое задание на проверке*\n\n"
+                f"👤 {student_name}\n"
+                f"📌 {task_title}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📑 Перейти к модерации", callback_data="menu_moderation")]
+                ])
+            )
+        except Exception:
+            pass
 
 
 # ── Модерация ─────────────────────────────────────────────────────────────────
