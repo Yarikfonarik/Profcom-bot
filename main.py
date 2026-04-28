@@ -5,10 +5,47 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
+from sqlalchemy import text
 
 from config import BOT_TOKEN
 from models import Base
-from database import engine
+from database import engine, Session
+
+
+def _fix_sequences():
+    """Восстанавливает sequence PostgreSQL после прямого SQL-импорта данных."""
+    tables = [
+        'students', 'tasks', 'task_verifications', 'merchandise',
+        'purchases', 'events', 'event_participants', 'lectures',
+        'lecture_scans', 'support_tickets', 'support_messages',
+        'registration_requests', 'reg_request_messages',
+        'unmatched_barcodes', 'attendance',
+    ]
+    with Session() as session:
+        for table in tables:
+            try:
+                session.execute(text(
+                    f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                    f"COALESCE((SELECT MAX(id) FROM {table}), 1))"
+                ))
+            except Exception:
+                pass
+        try:
+            session.commit()
+        except Exception:
+            pass
+
+
+def _migrate_schema():
+    """Добавляет новые колонки в существующие таблицы (safe migration)."""
+    with Session() as session:
+        try:
+            session.execute(text(
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS pickup_info TEXT"
+            ))
+            session.commit()
+        except Exception:
+            pass
 
 from handlers import (
     navigation, registration, tasks, shop,
@@ -32,6 +69,8 @@ async def set_commands(bot: Bot):
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     Base.metadata.create_all(engine)
+    _fix_sequences()     # Сбрасываем sequence после прямых SQL-импортов
+    _migrate_schema()    # Добавляем новые колонки
 
     bot = Bot(token=BOT_TOKEN)
     dp  = Dispatcher(storage=MemoryStorage())
