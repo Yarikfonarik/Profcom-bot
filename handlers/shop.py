@@ -12,6 +12,12 @@ from config import ADMIN_IDS
 router = Router()
 PAGE_SIZE = 5
 
+DEFAULT_PICKUP_INFO = (
+    "📍 *Где получить:* Московский проспект 15, Главный корпус, "
+    "Профком обучающихся, каб. И\\-108\n"
+    "🕐 *Время выдачи:* пн–пт, 8:00–17:00"
+)
+
 
 def _stock_emoji(stock: int, bought: bool) -> str:
     if bought:
@@ -65,7 +71,11 @@ async def _show_shop_page(target, page: int, user_id: int):
 
     bought_ids = await _get_bought_ids(user_id)
     is_admin = user_id in ADMIN_IDS
-    txt = "🛍 Витрина магазина:" if page_items else "🛍 Магазин пока пуст."
+    txt = (
+        "🛍 *Витрина магазина*\n\n"
+        f"{DEFAULT_PICKUP_INFO}\n\n"
+        "ℹ️ _Каждый товар можно приобрести только 1 раз за учебный год\\._\n"
+    ) if page_items else "🛍 Магазин пока пуст."
     kb = _build_shop_kb(page_items, bought_ids, page, total, is_admin)
 
     if isinstance(target, CallbackQuery):
@@ -73,9 +83,9 @@ async def _show_shop_page(target, page: int, user_id: int):
             await target.message.delete()
         except Exception:
             pass
-        await target.message.answer(txt, reply_markup=kb)
+        await target.message.answer(txt, reply_markup=kb, parse_mode="MarkdownV2")
     else:
-        await target.answer(txt, reply_markup=kb)
+        await target.answer(txt, reply_markup=kb, parse_mode="MarkdownV2")
 
 
 @router.callback_query(F.data == "menu_shop")
