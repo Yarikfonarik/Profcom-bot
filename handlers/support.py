@@ -67,6 +67,11 @@ async def _send_to_chat(message: Message, ticket_id: int, sender_id: int, bot: B
         mods = _get_mods(session)
 
     is_mod_sender = sender_id != student_tg
+    # Имя модератора не показываем — отображаем единый ярлык «Поддержка»
+    if is_mod_sender:
+        sender_display = "Поддержка"
+    else:
+        sender_display = _sender_name(session, sender_id, student_tg)
     header = f"{'🛡' if is_mod_sender else '👤'} *{sender_display}*:\n"
     mod_ids = [mod_tg] if mod_tg else [m[0] for m in mods]
 
@@ -119,11 +124,11 @@ async def enter_chat(callback: CallbackQuery, state: FSMContext):
 
         history = []
         for sm in messages:
-            is_mod = sm.sender_id != student_tg
-            name = _sender_name(session, sm.sender_id, student_tg)
+            is_mod_msg = sm.sender_id != student_tg
+            name = "Поддержка" if is_mod_msg else _sender_name(session, sm.sender_id, student_tg)
             ts = sm.sent_at.strftime("%H:%M")
             content = sm.text or f"[{sm.file_type}]"
-            history.append(f"[{ts}] {'🛡' if is_mod else '👤'} {name}: {content}")
+            history.append(f"[{ts}] {'🛡' if is_mod_msg else '👤'} {name}: {content}")
 
     _active_chat[user_id] = ticket_id
     await state.clear()
