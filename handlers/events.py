@@ -623,6 +623,14 @@ async def _finish_ev_merch(message: Message, state: FSMContext):
     data = await state.get_data()
     event_id = data["ev_merch_event_id"]
     with Session() as session:
+        # Сбрасываем sequence на случай десинхронизации после прямого SQL-импорта
+        try:
+            session.execute(text(
+                "SELECT setval(pg_get_serial_sequence('merchandise', 'id'), "
+                "COALESCE((SELECT MAX(id) FROM merchandise), 1))"
+            ))
+        except Exception:
+            pass
         m = Merchandise(
             name=data["name"], description=data["description"],
             price=data["price"], stock=data["stock"],
@@ -720,6 +728,7 @@ async def event_settings(callback: CallbackQuery):
         [InlineKeyboardButton(text="📅 Дата",         callback_data=f"edit_ev_{event_id}_event_date")],
         [InlineKeyboardButton(text="📝 Описание",     callback_data=f"edit_ev_{event_id}_description")],
         [InlineKeyboardButton(text="🚀 Как попасть",  callback_data=f"edit_ev_{event_id}_how_to_join")],
+        [InlineKeyboardButton(text="📍 Место выдачи", callback_data=f"edit_ev_{event_id}_pickup_info")],
         [InlineKeyboardButton(text="🖼 Картинка",     callback_data=f"edit_ev_{event_id}_image")],
         [InlineKeyboardButton(text="⬅️ Назад",       callback_data=f"event_admin_{event_id}")],
     ]
@@ -766,6 +775,7 @@ async def edit_event_field_start(callback: CallbackQuery, state: FSMContext):
         "event_date":  "📅 Новая дата (или «нет»):",
         "description": "📝 Новое описание (или «нет»):",
         "how_to_join": "🚀 Как попасть (или «нет»):",
+        "pickup_info": "📍 Место выдачи товаров (или «нет» для сброса к адресу по умолчанию):\n\nПо умолчанию: Московский проспект 15, Главный корпус, Профком обучающихся, каб. И-108, пн–пт 8:00–17:00",
         "image":       "🖼 Отправьте новую картинку:",
     }
     await state.update_data(edit_event_id=event_id, edit_field=field)
@@ -801,7 +811,7 @@ async def save_event_field(message: Message, state: FSMContext):
         if field == "points":
             if not value.isdigit(): return await message.answer("❗ Число")
             ev.points = int(value)
-        elif field in ("event_date", "description", "how_to_join"):
+        elif field in ("event_date", "description", "how_to_join", "pickup_info"):
             setattr(ev, field, None if none_val else value)
         else:
             setattr(ev, field, value)
@@ -1280,6 +1290,9 @@ async def event_shop_page(callback: CallbackQuery):
                 items.append(m)
         bought = {p.merch_id for p in session.query(Purchase).filter_by(student_id=student.id if student else -1).all()}
         balance = participant.event_balance
+        pickup = event.pickup_info or (
+            "Московский проспект 15, Главный корпус, Профком обучающихся, каб. И-108 (пн–пт, 8:00–17:00)"
+        )
 
     buttons = []
     for item in items:
@@ -1288,7 +1301,13 @@ async def event_shop_page(callback: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"event_{event_id}")])
     try: await callback.message.delete()
     except Exception: pass
-    await callback.message.answer(f"🛍 *{event.title}*\n💰 Баллы: {balance}", parse_mode="Markdown",
+    shop_text = (
+        f"🛍 *{event.title}*\n"
+        f"💰 Баллы мероприятия: {balance}\n\n"
+        f"📍 *Где получить:* {pickup}\n\n"
+        f"ℹ️ Каждый товар можно купить только 1 раз."
+    )
+    await callback.message.answer(shop_text, parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
