@@ -125,6 +125,7 @@ class Event(Base):
     has_tasks = Column(Boolean, default=True)
     has_lectures = Column(Boolean, default=True)
     has_shop = Column(Boolean, default=True)
+    pickup_info = Column(Text, nullable=True)   # Адрес выдачи товаров мероприятия
     created_at = Column(DateTime, default=datetime.utcnow)
     participants = relationship("EventParticipant", back_populates="event")
     lectures = relationship("Lecture", back_populates="event")
