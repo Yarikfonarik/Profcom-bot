@@ -8,14 +8,15 @@ from database import Session
 from models import Merchandise, Student, Purchase
 from states import ItemCreateState, ItemEditState
 from config import ADMIN_IDS
+from security import safe_int, rate_limited, validate_length, sanitize_text
 
 router = Router()
 PAGE_SIZE = 5
 
 DEFAULT_PICKUP_INFO = (
-    "📍 *Где получить:* Московский проспект 15, Главный корпус, "
-    "Профком обучающихся, каб. И\\-108\n"
-    "🕐 *Время выдачи:* пн–пт, 8:00–17:00"
+    "📍 Где получить: Московский проспект 15, Главный корпус, "
+    "Профком обучающихся, каб. И-108\n"
+    "🕐 Время выдачи: пн–пт, 8:00–17:00"
 )
 
 
@@ -74,7 +75,7 @@ async def _show_shop_page(target, page: int, user_id: int):
     txt = (
         "🛍 *Витрина магазина*\n\n"
         f"{DEFAULT_PICKUP_INFO}\n\n"
-        "ℹ️ _Каждый товар можно приобрести только 1 раз за учебный год\\._\n"
+        "ℹ️ Каждый товар можно приобрести только 1 раз за учебный год.\n"
     ) if page_items else "🛍 Магазин пока пуст."
     kb = _build_shop_kb(page_items, bought_ids, page, total, is_admin)
 
@@ -83,9 +84,9 @@ async def _show_shop_page(target, page: int, user_id: int):
             await target.message.delete()
         except Exception:
             pass
-        await target.message.answer(txt, reply_markup=kb, parse_mode="MarkdownV2")
+        await target.message.answer(txt, reply_markup=kb, parse_mode="Markdown")
     else:
-        await target.answer(txt, reply_markup=kb, parse_mode="MarkdownV2")
+        await target.answer(txt, reply_markup=kb, parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "menu_shop")
@@ -95,7 +96,7 @@ async def open_shop(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("shop_page_"))
 async def shop_page(callback: CallbackQuery):
-    page = int(callback.data.split("_")[2])
+    page = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     await _show_shop_page(callback, page, callback.from_user.id)
 
 
@@ -216,7 +217,7 @@ async def view_item(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("confirm_buy_"))
 async def confirm_buy(callback: CallbackQuery):
-    item_id = int(callback.data.split("_")[2])
+    item_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     user_id = callback.from_user.id
 
     with Session() as session:
@@ -269,7 +270,7 @@ async def manage_items(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("edititem_"))
 async def edit_item_menu(callback: CallbackQuery, state: FSMContext):
-    item_id = int(callback.data.split("_")[1])
+    item_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     await state.update_data(item_id=item_id)
     try:
         await callback.message.delete()
@@ -291,7 +292,7 @@ async def edit_item_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("deleteitem_"))
 async def delete_item(callback: CallbackQuery):
-    item_id = int(callback.data.split("_")[1])
+    item_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         session.execute(text("UPDATE merchandise SET is_deleted = TRUE, stock = 0 WHERE id = :id"), {"id": item_id})
         session.commit()
