@@ -87,7 +87,8 @@ async def events_menu(callback: CallbackQuery):
     ~F.data.startswith("event_task") & ~F.data.startswith("event_merch") &
     ~F.data.startswith("event_shop") & ~F.data.startswith("event_info") &
     ~F.data.startswith("event_support") & ~F.data.startswith("event_settings") &
-    ~F.data.startswith("event_admin"))
+    ~F.data.startswith("event_admin") &
+    ~F.data.startswith("event_edit_task_") & ~F.data.startswith("event_edit_merch_"))
 async def event_page(callback: CallbackQuery):
     raw = callback.data[6:]
     if not raw.isdigit(): return
