@@ -65,7 +65,8 @@ def _build_shop_kb(items, bought_ids: set, page: int, total: int, is_admin: bool
 async def _show_shop_page(target, page: int, user_id: int):
     with Session() as session:
         all_items = session.query(Merchandise).filter(
-            Merchandise.is_deleted == False
+            Merchandise.is_deleted == False,
+            Merchandise.event_id == None
         ).order_by(Merchandise.created_at).all()
         total = len(all_items)
         page_items = all_items[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
@@ -148,7 +149,8 @@ async def view_item(callback: CallbackQuery):
 
     with Session() as session:
         all_items = session.query(Merchandise).filter(
-            Merchandise.is_deleted == False
+            Merchandise.is_deleted == False,
+            Merchandise.event_id == None
         ).order_by(Merchandise.created_at).all()
         item_ids = [i.id for i in all_items]
         item = session.query(Merchandise).get(item_id)
@@ -245,7 +247,10 @@ async def confirm_buy(callback: CallbackQuery):
 # ── Управление товарами ──────────────────────────────────────────────────────
 async def _show_manage(message: Message):
     with Session() as session:
-        items = session.query(Merchandise).filter(Merchandise.is_deleted == False).all()
+        items = session.query(Merchandise).filter(
+            Merchandise.is_deleted == False,
+            Merchandise.event_id == None
+        ).all()
     buttons = []
     for item in items:
         buttons.append([InlineKeyboardButton(
