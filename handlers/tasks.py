@@ -8,6 +8,7 @@ from database import Session
 from models import Student, Task, TaskVerification
 from states import TaskState
 from config import ADMIN_IDS
+from security import safe_int, rate_limited, validate_length, sanitize_text
 from keyboards import main_menu_keyboard
 
 router = Router()
@@ -96,7 +97,7 @@ async def open_tasks_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("tasks_page_"))
 async def tasks_page(callback: CallbackQuery):
-    await _show_tasks_page(callback, int(callback.data.split("_")[2]), callback.from_user.id)
+    await _show_tasks_page(callback, safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0"), callback.from_user.id)
 
 
 @router.callback_query(F.data == "noop_task")
@@ -146,7 +147,7 @@ async def view_task(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("del_task_"))
 async def delete_task(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав")
-    task_id = int(callback.data.split("_")[2])
+    task_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         task = session.query(Task).get(task_id)
         if task: task.is_deleted = True; session.commit()
@@ -156,7 +157,7 @@ async def delete_task(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("do_task_"))
 async def start_task(callback: CallbackQuery, state: FSMContext):
-    task_id = int(callback.data.split("_")[2])
+    task_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         task = session.query(Task).get(task_id)
         if not task: return await callback.answer("Задание не найдено")
@@ -273,7 +274,7 @@ async def show_moderation(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("moderate_"))
 async def view_verification(callback: CallbackQuery):
-    v_id = int(callback.data.split("_")[1])
+    v_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         v = session.query(TaskVerification).get(v_id)
         if not v: return await callback.answer("Не найдено")
@@ -302,7 +303,7 @@ async def view_verification(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_verification(callback: CallbackQuery, bot: Bot):
-    v_id = int(callback.data.split("_")[1])
+    v_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         v = session.query(TaskVerification).get(v_id)
         if not v or v.status != "pending": return await callback.answer("Уже обработано")
@@ -319,7 +320,7 @@ async def approve_verification(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("reject_"))
 async def reject_verification(callback: CallbackQuery, bot: Bot):
-    v_id = int(callback.data.split("_")[1])
+    v_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         v = session.query(TaskVerification).get(v_id)
         if not v or v.status != "pending": return await callback.answer("Уже обработано")
@@ -415,6 +416,14 @@ async def ask_deadline_input(callback: CallbackQuery, state: FSMContext):
 async def receive_deadline_input(message: Message, state: FSMContext):
     try:
         deadline = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+        now_msk = _now_moscow()
+        if deadline <= now_msk:
+            return await message.answer(
+                f"❗ Дедлайн должен быть в будущем.\n"
+                f"Сейчас по МСК: *{now_msk.strftime('%d.%m.%Y %H:%M')}*\n\n"
+                "Введите корректную дату и время (МСК):",
+                parse_mode="Markdown"
+            )
         await state.update_data(deadline=deadline)
         await message.answer("Показывать время пользователям?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да", callback_data="show_dl_yes")],
