@@ -8,7 +8,7 @@ from sqlalchemy import text
 from database import Session
 from models import (Event, EventParticipant, Lecture, LectureScan,
     Student, EventTask, EventMerch, Task, Merchandise, TaskVerification, Purchase)
-from states import EventCreateState, LectureCreateState, EventScanState
+from security import safe_int, rate_limited, validate_length, sanitize_text
 from config import ADMIN_IDS
 
 router = Router()
@@ -181,7 +181,7 @@ async def event_page(callback: CallbackQuery):
     ~F.data.startswith("event_admin_tasks_") & ~F.data.startswith("event_admin_merch_"))
 async def event_admin_page(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
 
     with Session() as session:
         event = session.query(Event).get(event_id)
@@ -243,7 +243,7 @@ async def event_admin_page(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("event_admin_tasks_"))
 async def event_admin_tasks(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         linked = session.query(EventTask).filter_by(event_id=event_id).all()
@@ -279,7 +279,7 @@ async def event_admin_tasks(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("create_ev_task_"))
 async def create_event_task_start(callback: CallbackQuery, state: FSMContext):
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     await state.update_data(ev_task_event_id=event_id)
     await state.set_state(EventTaskCreateState.AWAITING_TITLE)
     await callback.message.answer(
@@ -422,7 +422,7 @@ async def unlink_task(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("event_admin_merch_"))
 async def event_admin_merch(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         linked = session.query(EventMerch).filter_by(event_id=event_id).all()
@@ -570,7 +570,7 @@ async def unlink_merch(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("create_ev_merch_"))
 async def create_ev_merch_start(callback: CallbackQuery, state: FSMContext):
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     await state.update_data(ev_merch_event_id=event_id)
     await state.set_state(EventMerchCreateState.AWAITING_NAME)
     await callback.message.answer(
@@ -652,7 +652,7 @@ async def _finish_ev_merch(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("event_task_stats_"))
 async def event_task_stats(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         linked = session.query(EventTask).filter_by(event_id=event_id).all()
@@ -679,7 +679,7 @@ async def event_task_stats(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("event_merch_stats_"))
 async def event_merch_stats(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         linked = session.query(EventMerch).filter_by(event_id=event_id).all()
@@ -707,7 +707,7 @@ async def event_merch_stats(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("event_settings_"))
 async def event_settings(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
     with Session() as session:
         event = session.query(Event).get(event_id)
@@ -756,7 +756,7 @@ async def toggle_feature(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("toggle_hidden_"))
 async def toggle_hidden(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         event.hidden = not event.hidden; session.commit()
@@ -828,7 +828,7 @@ async def save_event_field(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("event_info_"))
 async def event_info(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
     if not event: return await callback.answer("Не найдено")
@@ -904,10 +904,65 @@ async def _ask_how_to_join(message, state):
 async def event_how_to_join(message: Message, state: FSMContext):
     val = message.text.strip()
     await state.update_data(how_to_join=None if val.lower() == "нет" else val)
-    await message.answer("Видимость:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👁 Открытое",                callback_data="ev_vis_0")],
-        [InlineKeyboardButton(text="🔒 Скрытое (после скана)",   callback_data="ev_vis_1")],
-    ]))
+    await _ask_pickup_info(message, state)
+
+
+async def _ask_pickup_info(message, state):
+    await message.answer(
+        "📍 *Место выдачи товаров:*\n\n"
+        "По умолчанию:\n"
+        "_Московский проспект 15, Главный корпус, Профком обучающихся, каб. И-108, пн–пт 8:00–17:00_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Использовать по умолчанию", callback_data="ev_pickup_default")],
+            [InlineKeyboardButton(text="✏️ Указать своё место",        callback_data="ev_pickup_custom")],
+        ])
+    )
+
+
+@router.callback_query(F.data == "ev_pickup_default")
+async def ev_pickup_default(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(pickup_info=None)
+    await _ask_visibility(callback.message, state)
+
+
+@router.callback_query(F.data == "ev_pickup_custom")
+async def ev_pickup_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "📍 Введите адрес:\n\n"
+        "Пример: Московский проспект 15, Главный корпус, каб. И-108"
+    )
+    await state.set_state(EventCreateState.AWAITING_PICKUP_ADDRESS)
+
+
+@router.message(EventCreateState.AWAITING_PICKUP_ADDRESS)
+async def ev_pickup_address(message: Message, state: FSMContext):
+    await state.update_data(pickup_address=message.text.strip())
+    await message.answer(
+        "🕐 Введите время выдачи:\n\n"
+        "Пример: пн–пт, 8:00–17:00"
+    )
+    await state.set_state(EventCreateState.AWAITING_PICKUP_HOURS)
+
+
+@router.message(EventCreateState.AWAITING_PICKUP_HOURS)
+async def ev_pickup_hours(message: Message, state: FSMContext):
+    data = await state.get_data()
+    address = data.get("pickup_address", "")
+    hours = message.text.strip()
+    await state.update_data(pickup_info=f"{address}, {hours}")
+    await _ask_visibility(message, state)
+
+
+async def _ask_visibility(target, state):
+    """target — Message или callback.message"""
+    await target.answer(
+        "Видимость:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Открытое",               callback_data="ev_vis_0")],
+            [InlineKeyboardButton(text="🔒 Скрытое (после скана)",  callback_data="ev_vis_1")],
+        ])
+    )
     await state.set_state(EventCreateState.AWAITING_HIDDEN)
 
 
@@ -951,6 +1006,7 @@ async def event_features_done(callback: CallbackQuery, state: FSMContext):
             title=data["title"], points=data["points"],
             event_date=data.get("event_date"), description=data.get("description"),
             image_file_id=data.get("image_file_id"), how_to_join=data.get("how_to_join"),
+            pickup_info=data.get("pickup_info"),
             hidden=data.get("hidden", False),
             has_lectures=data.get("has_lectures", True),
             has_tasks=data.get("has_tasks", True),
@@ -979,7 +1035,7 @@ async def event_features_done(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("lectures_"))
 async def lectures_list(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[1])
+    event_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         lectures = session.query(Lecture).filter_by(event_id=event_id).all()
@@ -994,7 +1050,7 @@ async def lectures_list(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("add_lecture_"))
 async def add_lecture_start(callback: CallbackQuery, state: FSMContext):
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     await state.update_data(event_id=event_id)
     await callback.message.answer("📚 Название лекции:")
     await state.set_state(LectureCreateState.AWAITING_TITLE)
@@ -1022,7 +1078,7 @@ async def lecture_points(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("lecture_") & ~F.data.startswith("lecture_scan"))
 async def lecture_page(callback: CallbackQuery):
-    lid = int(callback.data.split("_")[1])
+    lid = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         lec = session.query(Lecture).get(lid)
         if not lec: return await callback.answer("Не найдена")
@@ -1040,7 +1096,7 @@ async def lecture_page(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("del_lecture_"))
 async def del_lecture(callback: CallbackQuery):
-    lid = int(callback.data.split("_")[2])
+    lid = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         lec = session.query(Lecture).get(lid); event_id = lec.event_id if lec else None
         if lec:
@@ -1057,7 +1113,7 @@ async def del_lecture(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("start_scan_"))
 async def start_lecture_scan(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    lid = int(callback.data.split("_")[2])
+    lid = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         lec = session.query(Lecture).get(lid)
         if not lec: return await callback.answer("Не найдена")
@@ -1126,7 +1182,7 @@ async def process_lecture_scan(message: Message, state: FSMContext, bot: Bot):
 @router.callback_query(F.data.startswith("scan_reg_"))
 async def start_participant_scan(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         count = session.query(EventParticipant).filter_by(event_id=event_id).count()
@@ -1187,7 +1243,7 @@ async def process_participant_registration(message: Message, state: FSMContext, 
 
 @router.callback_query(F.data.startswith("scan_list_"))
 async def scan_list(callback: CallbackQuery):
-    lid = int(callback.data.split("_")[2])
+    lid = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         lec = session.query(Lecture).get(lid)
         scans = session.query(LectureScan).filter_by(lecture_id=lid).order_by(LectureScan.scanned_at).all()
@@ -1211,7 +1267,7 @@ async def scan_list(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("event_tasks_"))
 async def event_tasks_page(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[2]); user_id = callback.from_user.id
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0"); user_id = callback.from_user.id
     with Session() as session:
         student = session.query(Student).filter_by(telegram_id=user_id).first()
         participant = session.query(EventParticipant).filter_by(event_id=event_id, student_id=student.id if student else -1).first() if student else None
@@ -1273,7 +1329,7 @@ async def start_event_task(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("event_shop_"))
 async def event_shop_page(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[2]); user_id = callback.from_user.id
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0"); user_id = callback.from_user.id
     with Session() as session:
         student = session.query(Student).filter_by(telegram_id=user_id).first()
         participant = session.query(EventParticipant).filter_by(event_id=event_id, student_id=student.id if student else -1).first() if student else None
@@ -1290,9 +1346,8 @@ async def event_shop_page(callback: CallbackQuery):
                 items.append(m)
         bought = {p.merch_id for p in session.query(Purchase).filter_by(student_id=student.id if student else -1).all()}
         balance = participant.event_balance
-        pickup = event.pickup_info or (
+        pickup = getattr(event, 'pickup_info', None) or \
             "Московский проспект 15, Главный корпус, Профком обучающихся, каб. И-108 (пн–пт, 8:00–17:00)"
-        )
 
     buttons = []
     for item in items:
@@ -1378,7 +1433,7 @@ async def event_buy(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("close_event_"))
 async def confirm_close_event(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         count = session.query(EventParticipant).filter_by(event_id=event_id).count()
@@ -1394,7 +1449,7 @@ async def confirm_close_event(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("do_close_"))
 async def do_close_event(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
         event.status = 'closed'
@@ -1410,7 +1465,7 @@ async def do_close_event(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("delete_event_"))
 async def confirm_delete_event(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         event = session.query(Event).get(event_id)
     await callback.message.answer(
@@ -1425,7 +1480,7 @@ async def confirm_delete_event(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("do_delete_event_"))
 async def do_delete_event(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     with Session() as session:
         # Удаляем в правильном порядке (FK constraints)
         session.execute(text("DELETE FROM lecture_scans WHERE lecture_id IN (SELECT id FROM lectures WHERE event_id=:eid)"), {"eid": event_id})
