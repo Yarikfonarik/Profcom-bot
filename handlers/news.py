@@ -10,6 +10,7 @@ from sqlalchemy import text
 from database import Session
 from models import Student, EventParticipant, Event
 from config import ADMIN_IDS
+from security import safe_int, rate_limited, validate_length, sanitize_text
 
 router = Router()
 
@@ -77,7 +78,7 @@ async def news_target_event(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("news_ev_"))
 async def news_ev_selected(callback: CallbackQuery, state: FSMContext):
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         ev = session.query(Event).get(event_id)
         count = session.query(EventParticipant).filter_by(event_id=event_id).count()
@@ -217,7 +218,7 @@ async def events_stats_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ev_stat_"))
 async def ev_stat_detail(callback: CallbackQuery):
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         ev = session.query(Event).get(event_id)
         participants = session.execute(text(
