@@ -1,5 +1,5 @@
 # handlers/registration.py
-import os, re, random, hashlib
+import os, re, hashlib
 import aiohttp
 
 from aiogram import Router, F, Bot
@@ -12,14 +12,16 @@ from states import (StudentVerificationState, PhoneAuthState, RegistrationReques
 from database import Session
 from config import ADMIN_IDS
 from keyboards import main_menu_keyboard, REMOVE_KEYBOARD
+from security import (
+    otp_create, otp_verify, otp_refresh, otp_can_resend, otp_get_meta,
+    rate_limited, validate_length, sanitize_text
+)
 
 router = Router()
 
 NOTISEND_PROJECT = os.environ.get("NOTISEND_PROJECT", "")
 NOTISEND_API_KEY  = os.environ.get("NOTISEND_API_KEY", "")
 NOTISEND_SENDER   = os.environ.get("NOTISEND_SENDER", "Profkom")
-
-_pending_codes: dict[int, dict] = {}
 
 
 def _normalize_phone(raw: str) -> str:
@@ -148,7 +150,7 @@ async def auth_phone_receive(message: Message, state: FSMContext):
             ])
         )
 
-    code = str(random.randint(100000, 999999))
+    code = otp_create(user_id, phone, student.id)
     await message.answer("⏳ Отправляем код в Telegram...")
     result = await _send_otp(phone, code)
 
@@ -161,11 +163,11 @@ async def auth_phone_receive(message: Message, state: FSMContext):
             ])
         )
 
-    _pending_codes[user_id] = {"code": code, "phone": phone, "student_id": student.id}
     await state.update_data(phone=phone, student_id=student.id)
     await state.set_state(PhoneAuthState.AWAITING_CODE)
     await message.answer(
-        f"✅ Код отправлен на номер {phone}!\n\nВведите 6-значный код:",
+        f"✅ Код отправлен на номер {phone}!\n\nВведите 6-значный код:\n_(код действует 5 минут)_",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Отправить снова", callback_data="resend_code")],
             [InlineKeyboardButton(text="⬅️ Назад",           callback_data="back_to_start")],
@@ -175,15 +177,22 @@ async def auth_phone_receive(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "resend_code")
 async def resend_code(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    can, remaining = otp_can_resend(uid)
+    if not can:
+        return await callback.answer(
+            f"⏳ Повторная отправка через {remaining} сек.", show_alert=True
+        )
     data = await state.get_data()
     phone = data.get("phone")
-    if not phone: return await callback.answer("Начните заново", show_alert=True)
-    code = str(random.randint(100000, 999999))
-    uid = callback.from_user.id
-    if uid in _pending_codes: _pending_codes[uid]["code"] = code
+    if not phone:
+        return await callback.answer("Начните заново", show_alert=True)
+    new_code = otp_refresh(uid)
+    if not new_code:
+        return await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
     await callback.answer("⏳")
-    await _send_otp(phone, code)
-    await callback.message.answer("✅ Новый код отправлен!")
+    await _send_otp(phone, new_code)
+    await callback.message.answer("✅ Новый код отправлен! _(действует 5 минут)_", parse_mode="Markdown")
 
 
 @router.message(PhoneAuthState.AWAITING_CODE)
@@ -193,23 +202,27 @@ async def auth_code_receive(message: Message, state: FSMContext):
         return await message.answer("❗ Введите 6-значный код:")
 
     user_id = message.from_user.id
-    pending = _pending_codes.get(user_id)
-    if not pending or pending["code"] != code_input:
-        return await message.answer(
-            "❌ Неверный код.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Новый код", callback_data="resend_code")]
-            ])
-        )
+    ok, err_msg = otp_verify(user_id, code_input)
 
-    student_id = pending["student_id"]
-    _pending_codes.pop(user_id, None)
+    if not ok:
+        if "устарела" in err_msg or "истёк" in err_msg or "попытк" in err_msg:
+            await state.clear()
+            return await message.answer(
+                f"❌ {err_msg}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Начать заново", callback_data="auth_phone")]
+                ])
+            )
+        return await message.answer(err_msg)
+
+    meta = otp_get_meta(user_id) or (await state.get_data())
+    student_id = meta.get("student_id")
 
     with Session() as session:
         student = session.query(Student).get(student_id)
         if not student:
             await state.clear()
-            return await message.answer("❌ Ошибка.")
+            return await message.answer("❌ Ошибка. Студент не найден.")
         student.telegram_id = user_id
         session.commit()
 
@@ -304,7 +317,11 @@ async def start_reg_request(callback: CallbackQuery, state: FSMContext):
 
 @router.message(RegistrationRequestState.AWAITING_FIO)
 async def reg_fio(message: Message, state: FSMContext):
-    await state.update_data(full_name=message.text.strip())
+    text = sanitize_text(message.text or "")
+    ok, err = validate_length(text, "full_name")
+    if not ok:
+        return await message.answer(err)
+    await state.update_data(full_name=text)
     await message.answer("*2. Дата рождения* (например: 01.01.2000):", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_BIRTH_DATE)
 
@@ -318,7 +335,11 @@ async def reg_birth(message: Message, state: FSMContext):
 
 @router.message(RegistrationRequestState.AWAITING_FACULTY)
 async def reg_faculty(message: Message, state: FSMContext):
-    await state.update_data(faculty=message.text.strip())
+    text = sanitize_text(message.text or "")
+    ok, err = validate_length(text, "faculty")
+    if not ok:
+        return await message.answer(err)
+    await state.update_data(faculty=text)
     await message.answer("*4. Номер телефона* (или «нет»):", parse_mode="Markdown")
     await state.set_state(RegistrationRequestState.AWAITING_PHONE)
 
@@ -376,7 +397,7 @@ async def reg_phone(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data.startswith("reg_chat_"))
 async def reg_chat_open(callback: CallbackQuery, state: FSMContext):
-    req_id = int(callback.data.split("_")[2])
+    req_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     await state.update_data(reg_reply_req_id=req_id)
     from states import RegRequestReplyState
     await state.set_state(RegRequestReplyState.AWAITING_MESSAGE)
