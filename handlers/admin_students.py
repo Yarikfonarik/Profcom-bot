@@ -15,6 +15,7 @@ from models import Student
 from database import Session
 from states import StudentSearchState, StudentEditState, ImportState, AdminMsgState
 from config import ADMIN_IDS
+from security import safe_int, rate_limited, validate_length, sanitize_text
 
 router = Router()
 
@@ -183,7 +184,7 @@ async def search_student(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("stucard_"))
 async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    student_id = int(callback.data.split("_")[1])
+    student_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         s = session.query(Student).get(student_id)
         if not s: return await callback.answer("Студент не найден", show_alert=True)
@@ -265,7 +266,7 @@ async def show_student_card(callback: CallbackQuery, state: FSMContext, bot: Bot
 @router.callback_query(F.data.startswith("unlink_tg_"))
 async def unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    student_id = int(callback.data.split("_")[2])
+    student_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         s = session.query(Student).get(student_id)
         if not s: return await callback.answer("Не найден")
@@ -283,7 +284,7 @@ async def unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
 @router.callback_query(F.data.startswith("do_unlink_tg_"))
 async def do_unlink_telegram(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    student_id = int(callback.data.split("_")[3])
+    student_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     with Session() as session:
         s = session.query(Student).get(student_id)
         if s: s.telegram_id = None; s.qr_file_id = None; session.commit()
@@ -423,7 +424,7 @@ async def save_student_field(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data.startswith("sreset_"))
 async def reset_one_balance(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    student_id = int(callback.data.split("_")[1])
+    student_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     with Session() as session:
         s = session.query(Student).get(student_id)
         name = s.full_name if s else "?"
@@ -438,7 +439,7 @@ async def reset_one_balance(callback: CallbackQuery, state: FSMContext, bot: Bot
 
 @router.callback_query(F.data.startswith("do_sreset_"))
 async def do_reset_one(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    student_id = int(callback.data.split("_")[2])
+    student_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         s = session.query(Student).get(student_id)
         if s: s.balance = 0; session.commit()
@@ -452,7 +453,7 @@ async def do_reset_one(callback: CallbackQuery, state: FSMContext, bot: Bot):
 @router.callback_query(F.data.startswith("admin_refresh_qr_"))
 async def admin_refresh_qr(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    student_id = int(callback.data.split("_")[3])
+    student_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     with Session() as session:
         s = session.query(Student).get(student_id)
         if s: s.qr_file_id = None; session.commit()
@@ -463,7 +464,7 @@ async def admin_refresh_qr(callback: CallbackQuery, state: FSMContext, bot: Bot)
 
 @router.callback_query(F.data.startswith("smsg_"))
 async def msg_student_prompt(callback: CallbackQuery, state: FSMContext):
-    student_id = int(callback.data.split("_")[1])
+    student_id = safe_int(callback.data.split("_")[1] if len(callback.data.split("_")) > 1 else "0")
     await state.update_data(msg_student_id=student_id)
     await state.set_state(AdminMsgState.AWAITING_MESSAGE)
     await callback.message.answer(
