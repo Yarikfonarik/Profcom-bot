@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from database import Session
 from models import Student, SupportTicket, SupportMessage
 from config import ADMIN_IDS
+from security import safe_int, rate_limited, validate_length, sanitize_text
 from states import SupportState
 
 router = Router()
@@ -108,7 +109,7 @@ async def _send_to_chat(message: Message, ticket_id: int, sender_id: int, bot: B
 
 @router.callback_query(F.data.startswith("enter_chat_"))
 async def enter_chat(callback: CallbackQuery, state: FSMContext):
-    ticket_id = int(callback.data.split("_")[2])
+    ticket_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     user_id = callback.from_user.id
 
     with Session() as session:
@@ -183,7 +184,7 @@ async def support_unreg(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("support_event_"))
 async def support_event(callback: CallbackQuery, state: FSMContext):
-    event_id = int(callback.data.split("_")[2])
+    event_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     await _open_support(callback.message, state, callback.from_user.id, event_id=event_id)
 
 
@@ -220,21 +221,21 @@ async def handle_chat_message(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data.startswith("reply_ticket_"))
 async def reply_to_ticket(callback: CallbackQuery, state: FSMContext):
-    ticket_id = int(callback.data.split("_")[2])
+    ticket_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     callback.data = f"enter_chat_{ticket_id}"
     await enter_chat(callback, state)
 
 
 @router.callback_query(F.data.startswith("student_reply_"))
 async def student_reply_start(callback: CallbackQuery, state: FSMContext):
-    ticket_id = int(callback.data.split("_")[2])
+    ticket_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     callback.data = f"enter_chat_{ticket_id}"
     await enter_chat(callback, state)
 
 
 @router.callback_query(F.data.startswith("transfer_choose_"))
 async def transfer_choose(callback: CallbackQuery):
-    ticket_id = int(callback.data.split("_")[2])
+    ticket_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     sender_id = callback.from_user.id
     with Session() as session:
         mods = _get_mods(session)
@@ -278,7 +279,7 @@ async def do_transfer_ticket(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("close_ticket_"))
 async def close_ticket(callback: CallbackQuery, bot: Bot):
-    ticket_id = int(callback.data.split("_")[2])
+    ticket_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     user_id = callback.from_user.id
     with Session() as session:
         ticket = session.query(SupportTicket).get(ticket_id)
@@ -337,7 +338,7 @@ async def support_admin(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("event_support_admin_"))
 async def event_support_admin(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return await callback.answer("⛔ Нет прав", show_alert=True)
-    event_id = int(callback.data.split("_")[3])
+    event_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
 
     with Session() as session:
         tickets = session.query(SupportTicket).filter(
