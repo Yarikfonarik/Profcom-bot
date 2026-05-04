@@ -6,6 +6,7 @@ from sqlalchemy import text, desc
 from database import Session
 from models import Student, Purchase, Event, EventParticipant, Task, TaskVerification, Merchandise
 from config import ADMIN_IDS
+from security import safe_int, rate_limited, validate_length, sanitize_text
 
 router = Router()
 BACK_KB = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_back")]])
@@ -201,7 +202,7 @@ async def task_stats_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("task_stat_"))
 async def task_stat_detail(callback: CallbackQuery):
-    task_id = int(callback.data.split("_")[2])
+    task_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         task = session.query(Task).get(task_id)
         approved = session.execute(text("SELECT COUNT(*) FROM task_verifications WHERE task_id=:id AND status='approved'"), {"id": task_id}).scalar()
@@ -237,7 +238,7 @@ async def shop_stats_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("shop_stat_"))
 async def shop_stat_detail(callback: CallbackQuery):
-    item_id = int(callback.data.split("_")[2])
+    item_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         item = session.query(Merchandise).get(item_id)
         bought = session.execute(text("SELECT COUNT(*) FROM purchases WHERE merch_id=:id"), {"id": item_id}).scalar()
