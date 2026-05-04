@@ -1,12 +1,19 @@
 # database.py
 import os
+import logging
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://bothost_db_f5c7e4fb86d6:4MDpWFhEw89fNp8FXuJk0aYEDceyB7qp_FZ5nLAVkjQ@node1.pghost.ru:15518/bothost_db_f5c7e4fb86d6"
-)
+logger = logging.getLogger("database")
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "Переменная среды DATABASE_URL не задана! "
+        "Добавьте её в настройки хостинга. "
+        "Пример: postgresql://user:password@host:port/dbname"
+    )
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+pg8000://", 1)
