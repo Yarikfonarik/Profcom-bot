@@ -69,6 +69,8 @@ class EventCreateState(StatesGroup):
     AWAITING_DESCRIPTION = State()
     AWAITING_IMAGE = State()
     AWAITING_HOW_TO_JOIN = State()
+    AWAITING_PICKUP_ADDRESS = State()
+    AWAITING_PICKUP_HOURS = State()
 
 
 class LectureCreateState(StatesGroup):
