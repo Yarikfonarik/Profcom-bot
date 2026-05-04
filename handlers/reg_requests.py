@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from database import Session
 from models import Student, RegistrationRequest, RegRequestMessage
 from config import ADMIN_IDS
+from security import safe_int, rate_limited, validate_length, sanitize_text
 from states import RegRequestReplyState
 
 router = Router()
@@ -84,7 +85,7 @@ async def reg_requests_all(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("view_reg_req_"))
 async def view_reg_request(callback: CallbackQuery):
-    req_id = int(callback.data.split("_")[3])
+    req_id = safe_int(callback.data.split("_")[3] if len(callback.data.split("_")) > 3 else "0")
     is_admin = callback.from_user.id in ADMIN_IDS
 
     with Session() as session:
@@ -139,7 +140,7 @@ async def view_reg_request(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("approve_reg_"))
 async def approve_reg(callback: CallbackQuery, bot: Bot):
-    req_id = int(callback.data.split("_")[2])
+    req_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         req = session.query(RegistrationRequest).get(req_id)
         req.status = 'approved'
@@ -168,7 +169,7 @@ async def approve_reg(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("reject_reg_"))
 async def reject_reg(callback: CallbackQuery, bot: Bot):
-    req_id = int(callback.data.split("_")[2])
+    req_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     with Session() as session:
         req = session.query(RegistrationRequest).get(req_id)
         req.status = 'rejected'
@@ -201,7 +202,7 @@ async def reject_reg(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("reply_reg_"))
 async def reply_reg_start(callback: CallbackQuery, state: FSMContext):
-    req_id = int(callback.data.split("_")[2])
+    req_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     _active_reg_chat[callback.from_user.id] = req_id
     await callback.message.answer(
         "✏️ Напишите сообщение заявителю:",
@@ -290,7 +291,7 @@ async def send_reg_reply(message: Message, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data.startswith("reg_chat_"))
 async def reg_chat_student(callback: CallbackQuery, state: FSMContext):
-    req_id = int(callback.data.split("_")[2])
+    req_id = safe_int(callback.data.split("_")[2] if len(callback.data.split("_")) > 2 else "0")
     _active_reg_chat[callback.from_user.id] = req_id
     await state.update_data(reg_reply_req_id=req_id)
     await state.set_state(RegRequestReplyState.AWAITING_MESSAGE)
